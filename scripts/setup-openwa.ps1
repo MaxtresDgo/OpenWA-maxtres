@@ -14,6 +14,13 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Refresh-Path
 }
 
+if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
+    Write-Host "Instalando WSL (requerido por Docker Desktop)..."
+    wsl --install --no-distribution
+    Write-Host "WSL instalado. Reinicia el equipo y vuelve a correr este script para continuar."
+    exit
+}
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Host "Instalando Docker Desktop..."
     winget install --id Docker.DockerDesktop -e --source winget --accept-package-agreements --accept-source-agreements
