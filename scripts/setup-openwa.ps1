@@ -46,16 +46,24 @@ Set-Location $openwaPath
 # Configura .env
 Copy-Item .env.minimal .env -Force
 
-$apiKey = -join ((48..57) + (97..122) + (65..90) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
-$envLines = Get-Content .env
-if ($envLines -match '^API_MASTER_KEY=') {
-    $envLines = $envLines -replace '^API_MASTER_KEY=.*', "API_MASTER_KEY=$apiKey"
-} else {
-    $envLines += "API_MASTER_KEY=$apiKey"
-}
-$envLines | Set-Content .env
-
-Write-Host "API_MASTER_KEY generada: $apiKey"
-
-# Levanta el proyecto
+# Levanta el proyecto (sin API_MASTER_KEY: OpenWA genera una admin key sola en el primer arranque)
 docker compose -f docker-compose.dev.yml up -d
+
+# La key generada se imprime una sola vez en el banner de arranque, con prefijo owa_k1_
+Write-Host "Esperando a que OpenWA genere su API key..."
+$deadline = (Get-Date).AddMinutes(2)
+$apiKey = $null
+while (-not $apiKey -and (Get-Date) -lt $deadline) {
+    $found = docker compose -f docker-compose.dev.yml logs openwa 2>$null |
+        Select-String -Pattern 'owa_k1_[0-9a-f]{64}' | Select-Object -First 1
+    if ($found) { $apiKey = $found.Matches[0].Value }
+    if (-not $apiKey) { Start-Sleep -Seconds 3 }
+}
+
+if ($apiKey) {
+    Write-Host ""
+    Write-Host "🔑 API Key generada por OpenWA: $apiKey"
+    Write-Host ""
+} else {
+    Write-Host "No se encontró la API key en los logs a tiempo. Revísala con: docker compose -f docker-compose.dev.yml logs openwa"
+}
