@@ -14,11 +14,25 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Refresh-Path
 }
 
-if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-    Write-Host "Instalando WSL (requerido por Docker Desktop)..."
+function Test-WslReady {
+    # wsl.exe existe como stub aunque la feature no esté habilitada; "wsl --status" sí falla si no lo está.
+    wsl --status *> $null
+    return $LASTEXITCODE -eq 0
+}
+
+if (-not (Test-WslReady)) {
+    Write-Host "Instalando/habilitando WSL (requerido por Docker Desktop)..."
     wsl --install --no-distribution
-    Write-Host "WSL instalado. Reinicia el equipo y vuelve a correr este script para continuar."
-    exit
+
+    $wslDeadline = (Get-Date).AddSeconds(30)
+    while (-not (Test-WslReady) -and (Get-Date) -lt $wslDeadline) {
+        Start-Sleep -Seconds 3
+    }
+
+    if (-not (Test-WslReady)) {
+        Write-Host "WSL requiere reiniciar el equipo. Reinicia y vuelve a correr este script para continuar."
+        exit
+    }
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
