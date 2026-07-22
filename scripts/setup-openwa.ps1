@@ -48,14 +48,14 @@ Copy-Item .env.minimal .env -Force
 
 $apiKey = -join ((48..57) + (97..122) + (65..90) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $envLines = Get-Content .env
-if ($envLines -match '^API_KEY=') {
-    $envLines = $envLines -replace '^API_KEY=.*', "API_KEY=$apiKey"
+if ($envLines -match '^API_MASTER_KEY=') {
+    $envLines = $envLines -replace '^API_MASTER_KEY=.*', "API_MASTER_KEY=$apiKey"
 } else {
-    $envLines += "API_KEY=$apiKey"
+    $envLines += "API_MASTER_KEY=$apiKey"
 }
 $envLines | Set-Content .env
 
-Write-Host "API_KEY generada: $apiKey"
+Write-Host "API_MASTER_KEY generada: $apiKey"
 
 # Levanta el proyecto
 docker compose -f docker-compose.dev.yml up -d
