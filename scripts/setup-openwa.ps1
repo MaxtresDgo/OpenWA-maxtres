@@ -47,7 +47,7 @@ Set-Location $openwaPath
 Copy-Item .env.minimal .env -Force
 
 # Levanta el proyecto (sin API_MASTER_KEY: OpenWA genera una admin key sola en el primer arranque)
-docker compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml up -d --build --remove-orphans
 
 # La key generada se imprime una sola vez en el banner de arranque, con prefijo owa_k1_
 Write-Host "Esperando a que OpenWA genere su API key..."
