@@ -1,0 +1,61 @@
+# Instala Git y Docker si faltan, clona OpenWA, configura .env y levanta el stack dev.
+# Requiere winget (incluido en Windows 10 1809+/11).
+
+$ErrorActionPreference = "Stop"
+
+function Refresh-Path {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path", "User")
+}
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "Instalando Git..."
+    winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+}
+
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "Instalando Docker Desktop..."
+    winget install --id Docker.DockerDesktop -e --source winget --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+}
+
+# Docker Desktop corre como app/servicio; arráncalo y espera a que el daemon responda.
+$dockerDesktop = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+if (-not (Get-Process "Docker Desktop" -ErrorAction SilentlyContinue) -and (Test-Path $dockerDesktop)) {
+    Start-Process $dockerDesktop
+}
+Write-Host "Esperando a que Docker esté listo..."
+$deadline = (Get-Date).AddMinutes(3)
+while ($true) {
+    docker info *> $null
+    if ($LASTEXITCODE -eq 0) { break }
+    if ((Get-Date) -gt $deadline) {
+        throw "Docker no respondió a tiempo. Ábrelo manualmente (primer arranque puede requerir habilitar WSL2/reiniciar) y vuelve a correr el script."
+    }
+    Start-Sleep -Seconds 5
+}
+
+# Clona el repo
+$openwaPath = Join-Path $HOME "openwa"
+if (-not (Test-Path $openwaPath)) {
+    git clone https://github.com/rmyndharis/OpenWA $openwaPath
+}
+Set-Location $openwaPath
+
+# Configura .env
+Copy-Item .env.minimal .env -Force
+
+$apiKey = -join ((48..57) + (97..122) + (65..90) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+$envLines = Get-Content .env
+if ($envLines -match '^API_KEY=') {
+    $envLines = $envLines -replace '^API_KEY=.*', "API_KEY=$apiKey"
+} else {
+    $envLines += "API_KEY=$apiKey"
+}
+$envLines | Set-Content .env
+
+Write-Host "API_KEY generada: $apiKey"
+
+# Levanta el proyecto
+docker compose -f docker-compose.dev.yml up -d
