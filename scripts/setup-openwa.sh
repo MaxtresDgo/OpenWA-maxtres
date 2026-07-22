@@ -34,6 +34,11 @@ until $DOCKER info &>/dev/null; do
   sleep 5
 done
 
+# Añade whatsapp.local a hosts para abrir la app en el navegador (puerto 80, sin sufijo en la URL)
+if ! grep -q 'whatsapp\.local' /etc/hosts; then
+  echo "127.0.0.1 whatsapp.local" | sudo tee -a /etc/hosts > /dev/null
+fi
+
 # Clona el repo
 openwa_path="$HOME/openwa"
 if [ ! -d "$openwa_path" ]; then
@@ -59,7 +64,11 @@ done
 if [ -n "$api_key" ]; then
   echo ""
   echo "🔑 API Key generada por OpenWA: $api_key"
+  echo "🌐 Abre http://whatsapp.local en el navegador"
   echo ""
 else
   echo "No se encontró la API key en los logs a tiempo. Revísala con: $COMPOSE -f docker-compose.dev.yml logs openwa"
 fi
+
+echo "Mostrando logs (Ctrl+C para salir)..."
+$COMPOSE -f docker-compose.dev.yml logs -f

@@ -57,6 +57,12 @@ while ($true) {
     Start-Sleep -Seconds 5
 }
 
+# Añade whatsapp.local a hosts para abrir la app en el navegador (puerto 80, sin sufijo en la URL)
+$hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+if (-not (Select-String -Path $hostsFile -Pattern 'whatsapp\.local' -Quiet)) {
+    Add-Content -Path $hostsFile -Value "127.0.0.1 whatsapp.local"
+}
+
 # Clona el repo
 $openwaPath = Join-Path $HOME "openwa"
 if (-not (Test-Path $openwaPath)) {
@@ -84,7 +90,11 @@ while (-not $apiKey -and (Get-Date) -lt $deadline) {
 if ($apiKey) {
     Write-Host ""
     Write-Host "🔑 API Key generada por OpenWA: $apiKey"
+    Write-Host "🌐 Abre http://whatsapp.local en el navegador"
     Write-Host ""
 } else {
     Write-Host "No se encontró la API key en los logs a tiempo. Revísala con: docker compose -f docker-compose.dev.yml logs openwa"
 }
+
+Write-Host "Mostrando logs (Ctrl+C para salir)..."
+docker compose -f docker-compose.dev.yml logs -f
