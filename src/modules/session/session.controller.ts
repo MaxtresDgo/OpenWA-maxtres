@@ -1,4 +1,16 @@
-import { Controller, Get, Post, Delete, Param, Query, Body, HttpCode, HttpStatus, ParseUUIDPipe } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Query,
+  Body,
+  HttpCode,
+  HttpStatus,
+  ParseUUIDPipe,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { SessionService } from './session.service';
 import {
@@ -10,7 +22,7 @@ import {
   SendChatStateDto,
   RequestPairingCodeDto,
   PairingCodeResponseDto,
-  ChatSummaryDto,
+  UpdateProxyDto,
 } from './dto';
 import { Session } from './entities/session.entity';
 import { ChatSummary } from '../../engine/interfaces/whatsapp-engine.interface';
@@ -166,6 +178,51 @@ export class SessionController {
       sessionName: session.name,
     });
     return this.transformSession(session);
+  }
+
+  @Patch(':id/proxy')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @ApiOperation({
+    summary: 'Set or clear a session proxy',
+    description:
+      'Persist the per-session egress proxy from structured fields (send no host to clear it). Takes ' +
+      'effect on the next start; restart the session to apply immediately. For a credentialed SOCKS5 ' +
+      'proxy, OpenWA runs an in-process authenticating relay so the Chromium engine can egress through it.',
+  })
+  @ApiParam({ name: 'id', description: 'Session ID' })
+  @ApiResponse({ status: 200, description: 'Proxy updated', type: SessionResponseDto })
+  @ApiResponse({ status: 404, description: 'Session not found' })
+  async updateProxy(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateProxyDto): Promise<SessionResponseDto> {
+    const session = await this.sessionService.updateProxy(id, dto);
+    await this.auditService.logInfo(AuditAction.SESSION_PROXY_UPDATED, {
+      sessionId: session.id,
+      sessionName: session.name,
+      metadata: { proxyEnabled: !!session.proxyUrl },
+    });
+    return this.transformSession(session);
+  }
+
+  @Post(':id/proxy/verify')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify a session egresses through its proxy',
+    description:
+      "Fetch the public IP through the session's configured proxy and compare it against the box's " +
+      'direct IP, confirming traffic actually leaves through the tunnel.',
+  })
+  @ApiParam({ name: 'id', description: 'Session ID' })
+  @ApiResponse({ status: 200, description: 'Verification result' })
+  @ApiResponse({ status: 400, description: 'No proxy configured for this session' })
+  @ApiResponse({ status: 404, description: 'Session not found' })
+  async verifyProxy(@Param('id', ParseUUIDPipe) id: string): Promise<{
+    configured: boolean;
+    directIp: string | null;
+    proxyIp: string | null;
+    throughProxy: boolean;
+    error: string | null;
+  }> {
+    return this.sessionService.verifyProxy(id);
   }
 
   @Get(':id/qr')

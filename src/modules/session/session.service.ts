@@ -20,7 +20,9 @@ import { MessageBatch } from '../message/entities/message-batch.entity';
 import { Webhook } from '../webhook/entities/webhook.entity';
 import { Template } from '../template/entities/template.entity';
 import { BaileysStoredMessage } from '../../engine/adapters/baileys-stored-message.entity';
-import { CreateSessionDto } from './dto';
+import { CreateSessionDto, UpdateProxyDto } from './dto';
+import { ProxyRelayService } from './proxy-relay.service';
+import { fetchEgressIp } from '../../common/utils/proxy-egress';
 import { EngineFactory } from '../../engine/engine.factory';
 import { resolveAuthTimeoutMs } from '../../engine/adapters/whatsapp-web-js.adapter';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
@@ -145,6 +147,18 @@ export function clampReconnectDelay(rawDelay: number, baseDelay: number): number
   return clampNumber(Number.isFinite(rawDelay) ? rawDelay : baseDelay, 0, RECONNECT_DELAY_CAP_MS);
 }
 
+/** Extract the (decoded) password from a stored proxy URL, or '' when absent/unparseable. */
+export function extractProxyPassword(proxyUrl?: string | null): string {
+  if (!proxyUrl) {
+    return '';
+  }
+  try {
+    return decodeURIComponent(new URL(proxyUrl).password);
+  } catch {
+    return '';
+  }
+}
+
 export function resolveMaxConcurrentSessions(configService?: Pick<ConfigService, 'get'>): number | null {
   const configured = configService?.get<number>('sessions.maxConcurrent', 0) ?? 0;
   if (!Number.isFinite(configured) || configured <= 0) return null;
@@ -255,6 +269,11 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     // service degrades to today's behaviour if it is ever constructed without the (global) LoggerModule.
     @Optional()
     private readonly shutdownService?: ShutdownService,
+    // Runs the in-process authenticating SOCKS5 relay so credentialed proxies work with the
+    // Chromium engine. @Optional so tests that construct the service directly keep working (they fall
+    // back to passing the raw proxyUrl straight through — fine for non-credentialed proxies).
+    @Optional()
+    private readonly proxyRelay?: ProxyRelayService,
   ) {}
 
   /**
@@ -439,6 +458,97 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     });
 
     return saved;
+  }
+
+  /**
+   * Set (or clear) a session's proxy from structured fields. Sending no `host` clears the proxy.
+   * The change is persisted only; it takes effect on the next engine (re)start — callers that want it
+   * applied immediately restart the session. When `password` is omitted while other fields change, the
+   * currently stored password is preserved (so editing host/user doesn't silently wipe it).
+   */
+  async updateProxy(id: string, dto: UpdateProxyDto): Promise<Session> {
+    const session = await this.findOne(id);
+
+    const host = dto.host?.trim();
+    let proxyUrl: string | null = null;
+    let proxyType: Session['proxyType'] = null;
+
+    if (host) {
+      if (!dto.type) {
+        throw new BadRequestException('proxy type is required when a host is set');
+      }
+      if (dto.port === undefined || dto.port === null) {
+        throw new BadRequestException('proxy port is required when a host is set');
+      }
+      const username = dto.username?.trim() ?? '';
+      // password: undefined => keep existing; '' => explicitly none; value => use it.
+      const existingPassword = extractProxyPassword(session.proxyUrl);
+      const password = dto.password === undefined ? existingPassword : dto.password;
+
+      let credentials = '';
+      if (username) {
+        credentials = encodeURIComponent(username);
+        if (password) {
+          credentials += `:${encodeURIComponent(password)}`;
+        }
+        credentials += '@';
+      }
+      proxyUrl = `${dto.type}://${credentials}${host}:${dto.port}`;
+      proxyType = dto.type;
+    }
+
+    await this.sessionRepository.update(id, { proxyUrl, proxyType });
+    this.logger.log(`Proxy updated for session: ${session.name}`, {
+      sessionId: id,
+      action: 'proxy_updated',
+      proxyEnabled: !!proxyUrl,
+    });
+    return this.findOne(id);
+  }
+
+  /**
+   * Check where a session's configured proxy egresses by fetching the public IP through it (with
+   * credentials, via Node — which, unlike Chromium, can authenticate SOCKS). The exit IP matches what
+   * a running session gets through the loopback relay. Also returns the box's direct IP for comparison
+   * so the caller can confirm the traffic actually leaves through the tunnel.
+   */
+  async verifyProxy(id: string): Promise<{
+    configured: boolean;
+    directIp: string | null;
+    proxyIp: string | null;
+    throughProxy: boolean;
+    error: string | null;
+  }> {
+    const session = await this.findOne(id);
+    if (!session.proxyUrl) {
+      throw new BadRequestException('No proxy is configured for this session');
+    }
+
+    let directIp: string | null = null;
+    try {
+      directIp = (await fetchEgressIp()).ip;
+    } catch {
+      // A missing direct IP is non-fatal — the proxy check below is what matters. Leave it null.
+    }
+
+    try {
+      const proxyIp = (await fetchEgressIp(session.proxyUrl)).ip;
+      return {
+        configured: true,
+        directIp,
+        proxyIp,
+        throughProxy: proxyIp !== null && proxyIp !== directIp,
+        error: null,
+      };
+    } catch (err) {
+      return {
+        configured: true,
+        directIp,
+        proxyIp: null,
+        throughProxy: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   async findAll(allowedSessions?: string[] | null, opts: ListOptions = {}): Promise<Session[]> {
@@ -857,11 +967,22 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
       proxyEnabled: !!session.proxyUrl,
     });
 
+    // A credentialed SOCKS5 proxy is unusable by Chromium directly (it cannot authenticate SOCKS),
+    // so translate it to a loopback relay URL the engine can use. Non-SOCKS / credential-less proxies
+    // pass straight through unchanged. The proxyType handed to the engine is derived from the effective
+    // URL so a relayed proxy is correctly labelled socks5.
+    const effectiveProxyUrl = this.proxyRelay
+      ? await this.proxyRelay.resolveEngineProxyUrl(session.proxyUrl)
+      : session.proxyUrl || undefined;
+    const effectiveProxyType = effectiveProxyUrl
+      ? ((new URL(effectiveProxyUrl).protocol.replace(':', '') as Session['proxyType']) ?? session.proxyType)
+      : undefined;
+
     const engine = this.engineFactory.create({
       sessionId: session.name,
       dbSessionId: id,
-      proxyUrl: session.proxyUrl || undefined,
-      proxyType: session.proxyType || undefined,
+      proxyUrl: effectiveProxyUrl,
+      proxyType: effectiveProxyType || session.proxyType || undefined,
     });
     this.engines.set(id, engine);
     // Clear any prior failure reason before a fresh start.

@@ -103,6 +103,24 @@ describe('StorageService (local) path traversal protection', () => {
     expect(fs.existsSync(path.join(baseDir, 'evil.txt'))).toBe(false);
     expect(count).toBe(1);
   });
+
+  it('deletes a file within the storage root', async () => {
+    await service.putFile('sub/gone.txt', Buffer.from('bye'));
+    expect(fs.existsSync(path.join(localPath, 'sub/gone.txt'))).toBe(true);
+
+    await service.deleteFile('sub/gone.txt');
+    expect(fs.existsSync(path.join(localPath, 'sub/gone.txt'))).toBe(false);
+  });
+
+  it('treats deleting a missing file as a no-op (idempotent)', async () => {
+    await expect(service.deleteFile('sub/never-existed.txt')).resolves.toBeUndefined();
+  });
+
+  it('rejects deleting a file outside the storage root', async () => {
+    fs.writeFileSync(path.join(baseDir, 'outside.txt'), 'keep');
+    await expect(service.deleteFile('../outside.txt')).rejects.toThrow();
+    expect(fs.existsSync(path.join(baseDir, 'outside.txt'))).toBe(true);
+  });
 });
 
 function makeLocalService(): { service: StorageService; baseDir: string; localPath: string } {

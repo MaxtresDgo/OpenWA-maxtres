@@ -42,6 +42,34 @@ export interface Session {
   updatedAt: string;
   /** Human-readable reason for the most recent terminal engine failure (set only when status is 'failed'). */
   lastError?: string | null;
+  /** Per-session proxy config (password never included). Null when no proxy is set. */
+  proxy?: SessionProxy | null;
+}
+
+export type ProxyType = 'http' | 'https' | 'socks4' | 'socks5';
+
+export interface SessionProxy {
+  type: ProxyType;
+  host: string;
+  port: number;
+  username?: string | null;
+  hasPassword: boolean;
+}
+
+export interface UpdateProxyInput {
+  type?: ProxyType;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+}
+
+export interface ProxyVerifyResult {
+  configured: boolean;
+  directIp: string | null;
+  proxyIp: string | null;
+  throughProxy: boolean;
+  error: string | null;
 }
 
 export interface SessionStats {
@@ -78,22 +106,35 @@ export interface Webhook {
   updatedAt: string;
 }
 
+export type TemplateMediaType = 'image' | 'video' | 'document' | 'audio';
+
 export interface MessageTemplate {
   id: string;
   sessionId: string;
   name: string;
-  body: string;
+  body?: string | null;
   header?: string | null;
   footer?: string | null;
+  hasMedia: boolean;
+  mediaType?: TemplateMediaType | null;
+  mimetype?: string | null;
+  filename?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface TemplatePayload {
   name: string;
-  body: string;
+  body?: string | null;
   header?: string | null;
   footer?: string | null;
+  // Attach/replace a single media file. When mediaType is set, mediaBase64 + mimetype are required.
+  mediaType?: TemplateMediaType | null;
+  mediaBase64?: string;
+  mimetype?: string;
+  filename?: string;
+  // On update only: clear an existing attachment (ignored on create).
+  removeMedia?: boolean;
 }
 
 export interface ApiKey {
@@ -649,6 +690,12 @@ export const sessionApi = {
   start: (id: string) => request<Session>(`/sessions/${id}/start`, { method: 'POST' }),
   stop: (id: string) => request<Session>(`/sessions/${id}/stop`, { method: 'POST' }),
   forceKill: (id: string) => request<Session>(`/sessions/${id}/force-kill`, { method: 'POST' }),
+  updateProxy: (id: string, proxy: UpdateProxyInput) =>
+    request<Session>(`/sessions/${id}/proxy`, {
+      method: 'PATCH',
+      body: JSON.stringify(proxy),
+    }),
+  verifyProxy: (id: string) => request<ProxyVerifyResult>(`/sessions/${id}/proxy/verify`, { method: 'POST' }),
   getQR: (id: string) => request<{ qrCode: string; status: string }>(`/sessions/${id}/qr`),
   requestPairingCode: (id: string, phoneNumber: string) =>
     request<{ pairingCode: string; status: string }>(`/sessions/${id}/pairing-code`, {
@@ -934,7 +981,8 @@ export const messageApi = {
     }),
   sendTemplate: (
     sessionId: string,
-    data: { chatId: string; templateId?: string; templateName?: string; variables?: Record<string, string> },
+    // The backend DTO field is `vars` (not `variables`); mismatching it silently drops substitutions.
+    data: { chatId: string; templateId?: string; templateName?: string; vars?: Record<string, string> },
   ) =>
     request<MessageResponse>(`/sessions/${sessionId}/messages/send-template`, {
       method: 'POST',

@@ -463,6 +463,54 @@
       "deleted": "התבנית נמחקה בהצלחה",
       "deleteFailed": "מחיקת התבנית נכשלה: {{message}}",
       "copied": "שם התבנית הועתק"
+    },
+    "media": {
+      "label": "קובץ מדיה מצורף",
+      "hint": "צרף קובץ תמונה, וידאו, מסמך או אודיו. טקסט התבנית יהפוך לכיתוב שלו.",
+      "add": "צירוף קובץ",
+      "replace": "החלפת קובץ",
+      "remove": "הסרת מדיה",
+      "badge": "מדיה",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "{{type}} צורף",
+      "previewUnavailable": "תצוגה מקדימה תהיה זמינה לאחר צירוף הקובץ מחדש.",
+      "types": {
+        "image": "תמונה",
+        "video": "וידאו",
+        "document": "מסמך",
+        "audio": "אודיו"
+      }
+    },
+    "send": {
+      "button": "שליחה",
+      "title": "שליחת \"{{name}}\"",
+      "mode": {
+        "chats": "צ׳אטים של הפעלה",
+        "manual": "רשימה / CSV"
+      },
+      "searchChats": "חיפוש צ׳אטים",
+      "noChats": "לא נמצאו צ׳אטים להפעלה זו",
+      "groupTag": "קבוצה",
+      "manualLabel": "נמענים (אחד בכל שורה)",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "העלאת CSV",
+      "csvHint": "המספרים נקראים מהקובץ ומתווספים לרשימה שלמעלה לבדיקה.",
+      "recipientsSummary": "{{count}} נמענים",
+      "tooMany": "יותר מדי נמענים (מקסימום {{max}}). קצר את הרשימה.",
+      "variables": "משתנים",
+      "variablesHint": "חלים על כל נמען.",
+      "confirm": "שליחה",
+      "sending": "שולח…",
+      "progress": "{{done}}/{{total}} נשלחו…",
+      "toasts": {
+        "sent": "התבנית נשלחה",
+        "failed": "שליחת התבנית נכשלה: {{message}}",
+        "bulkSent": "התבנית נשלחה ל-{{sent}} מתוך {{total}}",
+        "bulkPartial": "נשלח ל-{{sent}}, {{failed}} נכשלו",
+        "noRecipients": "הוסף לפחות נמען אחד"
+      },
+      "delayLabel": "השהיה בין שליחות (שניות)",
+      "delayHint": "השהיה בין כל הודעה מפחיתה את הסיכון לסימון. חלה בשליחה ליותר מנמען אחד."
     }
   },
   "apiKeys": {

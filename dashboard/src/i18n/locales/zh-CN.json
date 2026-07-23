@@ -459,6 +459,54 @@
       "deleted": "模板删除成功",
       "deleteFailed": "删除模板失败：{{message}}",
       "copied": "已复制模板名称"
+    },
+    "media": {
+      "label": "媒体附件",
+      "hint": "附加一个图片、视频、文档或音频文件。模板文本将作为其标题。",
+      "add": "附加文件",
+      "replace": "替换文件",
+      "remove": "移除媒体",
+      "badge": "媒体",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "已附加{{type}}",
+      "previewUnavailable": "重新附加文件后可预览。",
+      "types": {
+        "image": "图片",
+        "video": "视频",
+        "document": "文档",
+        "audio": "音频"
+      }
+    },
+    "send": {
+      "button": "发送",
+      "title": "发送\"{{name}}\"",
+      "mode": {
+        "chats": "会话聊天",
+        "manual": "列表 / CSV"
+      },
+      "searchChats": "搜索聊天",
+      "noChats": "此会话未找到聊天",
+      "groupTag": "群组",
+      "manualLabel": "收件人（每行一个）",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "上传 CSV",
+      "csvHint": "将从文件读取号码并添加到上方列表以供检查。",
+      "recipientsSummary": "{{count}} 个收件人",
+      "tooMany": "收件人过多（最多 {{max}}）。请缩减列表。",
+      "variables": "变量",
+      "variablesHint": "应用于每个收件人。",
+      "confirm": "发送",
+      "sending": "发送中…",
+      "progress": "已发送 {{done}}/{{total}}…",
+      "toasts": {
+        "sent": "模板已发送",
+        "failed": "发送模板失败：{{message}}",
+        "bulkSent": "模板已发送给 {{total}} 中的 {{sent}}",
+        "bulkPartial": "已发送 {{sent}}，{{failed}} 个失败",
+        "noRecipients": "请至少添加一个收件人"
+      },
+      "delayLabel": "每次发送间隔（秒）",
+      "delayHint": "每条消息之间的停顿可降低被标记的风险。发送给多个收件人时生效。"
     }
   },
   "apiKeys": {

@@ -1,3 +1,7 @@
+// `archiver` v8 is ESM-only; ts-jest cannot parse it when StorageService is imported transitively
+// (TemplateService → StorageService, reached from MessageService). Stub it — the export path is untested here.
+jest.mock('archiver', () => ({ default: jest.fn() }));
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -82,6 +86,7 @@ describe('MessageService', () => {
 
     templateService = {
       resolve: jest.fn(),
+      loadMedia: jest.fn(),
     };
 
     lidMappingStore = { lidsForPhone: jest.fn().mockReturnValue([]) };
@@ -231,6 +236,10 @@ describe('MessageService', () => {
         body: 'Hi {{customer}}, your order {{orderId}} shipped.',
         header: null,
         footer: null,
+        mediaType: null,
+        mediaKey: null,
+        mimetype: null,
+        filename: null,
         createdAt: new Date(),
         updatedAt: new Date(),
         session: undefined as unknown as Template['session'],
@@ -293,6 +302,61 @@ describe('MessageService', () => {
       });
 
       expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('test@c.us', 'Hi Alice {{unknown}}');
+    });
+
+    it('routes a media template to the matching media send with the rendered caption', async () => {
+      (templateService.resolve as jest.Mock).mockResolvedValue(
+        mockTemplate({
+          body: 'Hi {{customer}}',
+          mediaType: 'image',
+          mediaKey: 'templates/sess-1/tpl-1/x.jpg',
+          mimetype: 'image/jpeg',
+          filename: 'promo.jpg',
+        }),
+      );
+      (templateService.loadMedia as jest.Mock).mockResolvedValue({
+        buffer: Buffer.from('image-bytes'),
+        mediaType: 'image',
+        mimetype: 'image/jpeg',
+        filename: 'promo.jpg',
+      });
+
+      await service.sendTemplate('sess-1', {
+        chatId: '628@c.us',
+        templateName: 'order-confirmation',
+        vars: { customer: 'Alice' },
+      });
+
+      expect(templateService.loadMedia).toHaveBeenCalled();
+      expect(mockEngine.sendTextMessage).not.toHaveBeenCalled();
+      expect(mockEngine.sendImageMessage).toHaveBeenCalledWith(
+        '628@c.us',
+        expect.objectContaining({
+          data: Buffer.from('image-bytes').toString('base64'),
+          mimetype: 'image/jpeg',
+          filename: 'promo.jpg',
+          caption: 'Hi Alice',
+        }),
+      );
+    });
+
+    it('routes a media template with no body to a media send with no caption', async () => {
+      (templateService.resolve as jest.Mock).mockResolvedValue(
+        mockTemplate({ body: null, mediaType: 'video', mediaKey: 'k/v.mp4', mimetype: 'video/mp4' }),
+      );
+      (templateService.loadMedia as jest.Mock).mockResolvedValue({
+        buffer: Buffer.from('vid'),
+        mediaType: 'video',
+        mimetype: 'video/mp4',
+        filename: undefined,
+      });
+
+      await service.sendTemplate('sess-1', { chatId: '628@c.us', templateId: 'tpl-1' });
+
+      expect(mockEngine.sendVideoMessage).toHaveBeenCalledWith(
+        '628@c.us',
+        expect.objectContaining({ caption: undefined }),
+      );
     });
 
     it('should propagate NotFoundException when the template cannot be resolved', async () => {

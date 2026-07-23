@@ -12,6 +12,7 @@ import {
   GetObjectCommand,
   PutObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectCommand,
   HeadBucketCommand,
   CreateBucketCommand,
 } from '@aws-sdk/client-s3';
@@ -190,12 +191,13 @@ export class StorageService {
   }
 
   /**
-   * Delete a file previously written via `putFile`. Same unsafe-key guard as `getFile`/`putFile` (both
-   * backends key off it, S3's has no host filesystem to check `isPathWithin` against). Missing-file is
-   * treated as success on both backends (local: ENOENT is swallowed; S3 DeleteObject is idempotent by
-   * design) so a caller doesn't have to special-case "already gone".
+   * Remove a single object from the active backend. Best-effort by contract: a missing object is NOT
+   * an error (idempotent — the desired end-state "object absent" already holds), so callers doing
+   * cleanup on delete/replace don't have to special-case a first-time template with no prior media.
+   * Any other failure propagates so a genuine backend problem is visible to the caller's logs.
    */
   async deleteFile(filePath: string): Promise<void> {
+    // Same containment guard as get/putFile: never let an untrusted key escape the media/ prefix.
     if (!isSafeStorageKey(filePath)) {
       throw new Error(`Refusing to delete an unsafe storage key: ${filePath}`);
     }
@@ -449,7 +451,8 @@ export class StorageService {
     const fullPath = path.join(this.localPath, filePath);
     try {
       await fs.promises.unlink(fullPath);
-    } catch (error: unknown) {
+    } catch (error) {
+      // A missing file is a no-op (idempotent delete). Anything else propagates.
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
@@ -526,6 +529,8 @@ export class StorageService {
   private async deleteS3File(filePath: string): Promise<void> {
     if (!this.s3Client) throw new Error('S3 client not initialized');
 
+    // S3 DeleteObject is already idempotent — deleting an absent key returns success — so this needs
+    // no ENOENT special-casing like the local backend does.
     await this.s3Client.send(
       new DeleteObjectCommand({
         Bucket: this.s3Bucket,

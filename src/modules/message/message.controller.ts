@@ -76,7 +76,11 @@ export class MessageController {
 
   @Post('send-template')
   @RequireRole(ApiKeyRole.OPERATOR)
-  @ApiOperation({ summary: 'Render a stored text template and send it as a text message' })
+  @ApiOperation({
+    summary:
+      'Render a stored template and send it. A text template sends as text; a template with a media ' +
+      'attachment sends as that media (image/video/document/audio) with the rendered text as caption.',
+  })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiResponse({
     status: 201,

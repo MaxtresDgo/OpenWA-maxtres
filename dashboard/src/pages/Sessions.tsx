@@ -1,8 +1,23 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Trans, useTranslation } from 'react-i18next';
-import { Plus, QrCode, RefreshCw, Trash2, Eye, Loader2, Play, Square, Search, Filter, Skull } from 'lucide-react';
-import { sessionApi, type Session } from '../services/api';
+import {
+  Plus,
+  QrCode,
+  RefreshCw,
+  Trash2,
+  Eye,
+  Loader2,
+  Play,
+  Square,
+  Search,
+  Filter,
+  Skull,
+  Globe,
+  Check,
+  X,
+} from 'lucide-react';
+import { sessionApi, type Session, type ProxyType, type UpdateProxyInput, type ProxyVerifyResult } from '../services/api';
 import { queryKeys } from '../hooks/queries';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useToast } from '../components/Toast';
@@ -36,6 +51,16 @@ export function Sessions() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [killConfirmId, setKillConfirmId] = useState<string | null>(null);
+  const [proxyForm, setProxyForm] = useState<{
+    type: ProxyType;
+    host: string;
+    port: string;
+    username: string;
+    password: string;
+  }>({ type: 'socks5', host: '', port: '1080', username: '', password: '' });
+  const [proxySaving, setProxySaving] = useState(false);
+  const [proxyVerifying, setProxyVerifying] = useState(false);
+  const [proxyResult, setProxyResult] = useState<ProxyVerifyResult | null>(null);
 
   const fetchSessions = useCallback(async (): Promise<Session[]> => {
     try {
@@ -304,6 +329,87 @@ export function Sessions() {
       fetchSessions();
     } finally {
       setKillConfirmId(null);
+    }
+  };
+
+  // Open the details modal and seed the proxy form from the session's stored proxy (password is never
+  // returned by the API, so its field always starts blank).
+  const openDetails = (session: Session) => {
+    setSelectedSession(session);
+    setProxyResult(null);
+    const p = session.proxy;
+    setProxyForm({
+      type: p?.type ?? 'socks5',
+      host: p?.host ?? '',
+      port: p ? String(p.port) : '1080',
+      username: p?.username ?? '',
+      password: '',
+    });
+  };
+
+  // True when the form no longer matches the saved proxy — verification runs against the SAVED value,
+  // so we nudge the user to save first while dirty.
+  const proxyDirty = (() => {
+    if (!selectedSession) return false;
+    const p = selectedSession.proxy;
+    const host = proxyForm.host.trim();
+    if (!host) return !!p; // clearing an existing proxy is a pending change
+    return (
+      !p ||
+      p.type !== proxyForm.type ||
+      p.host !== host ||
+      String(p.port) !== proxyForm.port.trim() ||
+      (p.username ?? '') !== proxyForm.username.trim() ||
+      proxyForm.password !== ''
+    );
+  })();
+
+  const handleSaveProxy = async () => {
+    if (!selectedSession) return;
+    const id = selectedSession.id;
+    const host = proxyForm.host.trim();
+    const input: UpdateProxyInput = host
+      ? {
+          type: proxyForm.type,
+          host,
+          port: Number(proxyForm.port) || undefined,
+          username: proxyForm.username.trim() || undefined,
+          // Blank password keeps the stored one (backend treats undefined as "keep").
+          password: proxyForm.password ? proxyForm.password : undefined,
+        }
+      : { host: '' };
+    try {
+      setProxySaving(true);
+      const updated = await sessionApi.updateProxy(id, input);
+      setSelectedSession(updated);
+      setSessions(prev => prev.map(s => (s.id === id ? updated : s)));
+      setProxyForm(f => ({ ...f, password: '' }));
+      setProxyResult(null);
+      toast.success(t('sessions.proxy.savedTitle'), t('sessions.proxy.savedDesc'));
+    } catch (err) {
+      toast.error(t('sessions.proxy.saveErrorTitle'), err instanceof Error ? err.message : '');
+    } finally {
+      setProxySaving(false);
+    }
+  };
+
+  const handleVerifyProxy = async () => {
+    if (!selectedSession) return;
+    try {
+      setProxyVerifying(true);
+      setProxyResult(null);
+      const res = await sessionApi.verifyProxy(selectedSession.id);
+      setProxyResult(res);
+    } catch (err) {
+      setProxyResult({
+        configured: false,
+        directIp: null,
+        proxyIp: null,
+        throughProxy: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setProxyVerifying(false);
     }
   };
 
@@ -648,6 +754,134 @@ export function Sessions() {
               </span>
             </div>
           </div>
+
+          {canWrite && (
+            <div className="proxy-section">
+              <h4 className="proxy-title">
+                <Globe size={16} />
+                {t('sessions.proxy.title')}
+              </h4>
+              <p className="proxy-hint">{t('sessions.proxy.description')}</p>
+
+              <div className="proxy-form">
+                <div className="proxy-field">
+                  <label>{t('sessions.proxy.type')}</label>
+                  <CustomSelect
+                    value={proxyForm.type}
+                    onChange={v => setProxyForm(f => ({ ...f, type: v as ProxyType }))}
+                    options={[
+                      { value: 'socks5', label: 'SOCKS5' },
+                      { value: 'socks4', label: 'SOCKS4' },
+                      { value: 'http', label: 'HTTP' },
+                      { value: 'https', label: 'HTTPS' },
+                    ]}
+                  />
+                </div>
+                <div className="proxy-grid">
+                  <div className="proxy-field host">
+                    <label>{t('sessions.proxy.host')}</label>
+                    <input
+                      type="text"
+                      placeholder="100.104.50.91"
+                      value={proxyForm.host}
+                      onChange={e => setProxyForm(f => ({ ...f, host: e.target.value.trim() }))}
+                    />
+                  </div>
+                  <div className="proxy-field port">
+                    <label>{t('sessions.proxy.port')}</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="1080"
+                      value={proxyForm.port}
+                      onChange={e => setProxyForm(f => ({ ...f, port: e.target.value.replace(/\D/g, '') }))}
+                    />
+                  </div>
+                </div>
+                <div className="proxy-grid">
+                  <div className="proxy-field">
+                    <label>{t('sessions.proxy.username')}</label>
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      placeholder={t('sessions.proxy.optional')}
+                      value={proxyForm.username}
+                      onChange={e => setProxyForm(f => ({ ...f, username: e.target.value }))}
+                    />
+                  </div>
+                  <div className="proxy-field">
+                    <label>{t('sessions.proxy.password')}</label>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder={
+                        selectedSession.proxy?.hasPassword
+                          ? t('sessions.proxy.passwordKeep')
+                          : t('sessions.proxy.optional')
+                      }
+                      value={proxyForm.password}
+                      onChange={e => setProxyForm(f => ({ ...f, password: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="proxy-actions">
+                <button
+                  className="btn-secondary"
+                  onClick={handleVerifyProxy}
+                  disabled={proxyVerifying || !selectedSession.proxy || proxyDirty}
+                >
+                  {proxyVerifying ? <Loader2 className="animate-spin" size={16} /> : <Globe size={16} />}
+                  {t('sessions.proxy.verify')}
+                </button>
+                {selectedSession.proxy && (
+                  <button
+                    className="btn-action danger"
+                    onClick={() => setProxyForm(f => ({ ...f, host: '', username: '', password: '' }))}
+                  >
+                    <Trash2 size={16} />
+                    {t('sessions.proxy.remove')}
+                  </button>
+                )}
+                <button
+                  className="btn-primary"
+                  onClick={handleSaveProxy}
+                  disabled={proxySaving || !proxyDirty || (!!proxyForm.host.trim() && !proxyForm.port.trim())}
+                >
+                  {proxySaving ? <Loader2 className="animate-spin" size={16} /> : t('common.save')}
+                </button>
+              </div>
+
+              {proxyDirty && <p className="proxy-note dirty">{t('sessions.proxy.saveFirst')}</p>}
+
+              {proxyResult && (
+                <div className={`proxy-result ${proxyResult.throughProxy ? 'ok' : 'fail'}`}>
+                  {proxyResult.throughProxy ? (
+                    <span className="proxy-result-line">
+                      <Check size={16} />
+                      {t('sessions.proxy.resultOk', { ip: proxyResult.proxyIp })}
+                    </span>
+                  ) : proxyResult.error ? (
+                    <span className="proxy-result-line">
+                      <X size={16} />
+                      {t('sessions.proxy.resultError', { error: proxyResult.error })}
+                    </span>
+                  ) : (
+                    <span className="proxy-result-line">
+                      <X size={16} />
+                      {t('sessions.proxy.resultSameIp', { ip: proxyResult.proxyIp ?? '—' })}
+                    </span>
+                  )}
+                  {proxyResult.directIp && (
+                    <span className="proxy-direct">{t('sessions.proxy.directIp', { ip: proxyResult.directIp })}</span>
+                  )}
+                </div>
+              )}
+
+              <p className="proxy-note">{t('sessions.proxy.applyHint')}</p>
+            </div>
+          )}
         </Modal>
       )}
 
@@ -762,7 +996,7 @@ export function Sessions() {
               )}
 
               <div className="card-actions">
-                <button className="btn-action" onClick={() => setSelectedSession(session)}>
+                <button className="btn-action" onClick={() => openDetails(session)}>
                   <Eye size={16} />
                   {t('sessions.actions.view')}
                 </button>

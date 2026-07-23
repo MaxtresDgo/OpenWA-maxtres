@@ -459,6 +459,54 @@
       "deleted": "Modello eliminato con successo",
       "deleteFailed": "Impossibile eliminare il modello: {{message}}",
       "copied": "Nome del modello copiato"
+    },
+    "media": {
+      "label": "Allegato multimediale",
+      "hint": "Allega un file immagine, video, documento o audio. Il testo del modello ne diventa la didascalia.",
+      "add": "Allega file",
+      "replace": "Sostituisci file",
+      "remove": "Rimuovi media",
+      "badge": "Media",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "{{type}} allegato",
+      "previewUnavailable": "Anteprima disponibile dopo aver allegato di nuovo il file.",
+      "types": {
+        "image": "Immagine",
+        "video": "Video",
+        "document": "Documento",
+        "audio": "Audio"
+      }
+    },
+    "send": {
+      "button": "Invia",
+      "title": "Invia \"{{name}}\"",
+      "mode": {
+        "chats": "Chat della sessione",
+        "manual": "Elenco / CSV"
+      },
+      "searchChats": "Cerca chat",
+      "noChats": "Nessuna chat trovata per questa sessione",
+      "groupTag": "Gruppo",
+      "manualLabel": "Destinatari (uno per riga)",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "Carica CSV",
+      "csvHint": "I numeri vengono letti dal file e aggiunti alla lista sopra per la revisione.",
+      "recipientsSummary": "{{count}} destinatario/i",
+      "tooMany": "Troppi destinatari (max {{max}}). Riduci la lista.",
+      "variables": "Variabili",
+      "variablesHint": "Applicate a ogni destinatario.",
+      "confirm": "Invia",
+      "sending": "Invio…",
+      "progress": "{{done}}/{{total}} inviati…",
+      "toasts": {
+        "sent": "Modello inviato",
+        "failed": "Invio del modello non riuscito: {{message}}",
+        "bulkSent": "Modello inviato a {{sent}} su {{total}}",
+        "bulkPartial": "Inviato a {{sent}}, {{failed}} falliti",
+        "noRecipients": "Aggiungi almeno un destinatario"
+      },
+      "delayLabel": "Attesa tra gli invii (secondi)",
+      "delayHint": "Una pausa tra un messaggio e l’altro riduce il rischio di segnalazione. Vale con più destinatari."
     }
   },
   "apiKeys": {

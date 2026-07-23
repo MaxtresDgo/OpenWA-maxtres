@@ -1,6 +1,53 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { Session } from '../entities/session.entity';
 import { SessionStatus } from '../entities/session.entity';
+import type { ProxyType } from './update-proxy.dto';
+
+/**
+ * Non-secret view of a session's proxy config for the dashboard form. The password is intentionally
+ * NOT included — only whether one is set (`hasPassword`) — so it never travels in an API response.
+ */
+export class SessionProxyDto {
+  @ApiProperty({ enum: ['http', 'https', 'socks4', 'socks5'], example: 'socks5' })
+  type: ProxyType;
+
+  @ApiProperty({ example: '100.104.50.91' })
+  host: string;
+
+  @ApiProperty({ example: 1080 })
+  port: number;
+
+  @ApiPropertyOptional({ type: String, example: 'raspproxy8', nullable: true })
+  username?: string | null;
+
+  @ApiProperty({ example: true, description: 'Whether a password is stored (the value itself is never returned).' })
+  hasPassword: boolean;
+}
+
+/**
+ * Parse a stored `proxyUrl` into the non-secret fields the dashboard needs, or `null` when the URL is
+ * absent/unparseable. The password is deliberately dropped. Exported for reuse/testing.
+ */
+export function parseProxyForResponse(proxyUrl?: string | null): SessionProxyDto | null {
+  if (!proxyUrl) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(proxyUrl);
+  } catch {
+    return null;
+  }
+  const type = parsed.protocol.replace(':', '') as ProxyType;
+  const port = parsed.port ? parseInt(parsed.port, 10) : NaN;
+  return {
+    type,
+    host: parsed.hostname,
+    port: Number.isInteger(port) ? port : 0,
+    username: parsed.username ? decodeURIComponent(parsed.username) : null,
+    hasPassword: parsed.password !== '',
+  };
+}
 
 export class SessionResponseDto {
   @ApiProperty({ example: 'sess_123e4567-e89b-12d3-a456-426614174000' })
@@ -38,10 +85,17 @@ export class SessionResponseDto {
   })
   lastError?: string | null;
 
+  @ApiPropertyOptional({
+    type: SessionProxyDto,
+    nullable: true,
+    description: 'Per-session proxy configuration (password omitted). Null when no proxy is set.',
+  })
+  proxy?: SessionProxyDto | null;
+
   /**
-   * Map a Session entity to the public response shape, stripping sensitive
-   * engine config fields (`config`, `proxyUrl`, `proxyType`) that must not
-   * appear in any API response.
+   * Map a Session entity to the public response shape. The raw `config` blob and the proxy password
+   * are stripped; the proxy's non-secret fields (type/host/port/username/hasPassword) are surfaced so
+   * the dashboard can render and edit them.
    */
   static fromEntity(session: Session): SessionResponseDto {
     return {
@@ -55,6 +109,7 @@ export class SessionResponseDto {
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       lastError: session.lastError ?? null,
+      proxy: parseProxyForResponse(session.proxyUrl),
     };
   }
 }

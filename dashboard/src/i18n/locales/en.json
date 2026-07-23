@@ -11,6 +11,7 @@
     "cancel": "Cancel",
     "delete": "Delete",
     "create": "Create",
+    "save": "Save",
     "close": "Close",
     "showApiKey": "Show API key",
     "hideApiKey": "Hide API key",
@@ -287,6 +288,28 @@
       "created": "Created",
       "lastActive": "Last Active"
     },
+    "proxy": {
+      "title": "Proxy",
+      "description": "Route this session's traffic through an egress proxy (e.g. a residential Tailscale IP). For a SOCKS5 proxy with a username/password, OpenWA runs a local authenticating relay so the browser engine can use it.",
+      "type": "Type",
+      "host": "Host / IP",
+      "port": "Port",
+      "username": "Username",
+      "password": "Password",
+      "optional": "optional",
+      "passwordKeep": "•••••• (unchanged)",
+      "verify": "Verify egress",
+      "remove": "Remove proxy",
+      "saveFirst": "Save your changes before verifying.",
+      "applyHint": "Changes apply on the next start — restart the session to apply now.",
+      "savedTitle": "Proxy saved",
+      "savedDesc": "Restart the session to apply the change.",
+      "saveErrorTitle": "Could not save proxy",
+      "resultOk": "Traffic egresses through the proxy — IP {{ip}}",
+      "resultSameIp": "The exit IP ({{ip}}) matches the direct IP — traffic is NOT going through the proxy.",
+      "resultError": "Proxy check failed: {{error}}",
+      "directIp": "Direct IP: {{ip}}"
+    },
     "actions": {
       "view": "View",
       "start": "Start",
@@ -459,6 +482,54 @@
       "deleted": "Template deleted successfully",
       "deleteFailed": "Failed to delete template: {{message}}",
       "copied": "Template name copied"
+    },
+    "media": {
+      "label": "Media attachment",
+      "hint": "Attach one image, video, document or audio file. The template text becomes its caption.",
+      "add": "Attach file",
+      "replace": "Replace file",
+      "remove": "Remove media",
+      "badge": "Media",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "{{type}} attached",
+      "previewUnavailable": "Preview available after re-attaching the file.",
+      "types": {
+        "image": "Image",
+        "video": "Video",
+        "document": "Document",
+        "audio": "Audio"
+      }
+    },
+    "send": {
+      "button": "Send",
+      "title": "Send \"{{name}}\"",
+      "mode": {
+        "chats": "Session chats",
+        "manual": "List / CSV"
+      },
+      "searchChats": "Search chats",
+      "noChats": "No chats found for this session",
+      "groupTag": "Group",
+      "manualLabel": "Recipients (one per line)",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "Upload CSV",
+      "csvHint": "Numbers are read from the file and added to the list above for review.",
+      "recipientsSummary": "{{count}} recipient(s)",
+      "tooMany": "Too many recipients (max {{max}}). Trim the list.",
+      "variables": "Variables",
+      "variablesHint": "Applied to every recipient.",
+      "confirm": "Send",
+      "sending": "Sending…",
+      "progress": "{{done}}/{{total}} sent…",
+      "toasts": {
+        "sent": "Template sent",
+        "failed": "Failed to send template: {{message}}",
+        "bulkSent": "Template sent to {{sent}} of {{total}}",
+        "bulkPartial": "Sent to {{sent}}, {{failed}} failed",
+        "noRecipients": "Add at least one recipient"
+      },
+      "delayLabel": "Delay between sends (seconds)",
+      "delayHint": "A pause between each message reduces the risk of being flagged. Applies when sending to more than one recipient."
     }
   },
   "apiKeys": {

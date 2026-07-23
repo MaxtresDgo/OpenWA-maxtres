@@ -764,3 +764,129 @@
   font-size: 0.9375rem;
   color: var(--text-primary);
 }
+
+/* ===== Per-session proxy config (details modal) ===== */
+.proxy-section {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.proxy-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.25rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.proxy-hint {
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.proxy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.proxy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.proxy-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.proxy-field.port {
+  max-width: 120px;
+}
+
+.proxy-grid:has(.proxy-field.port) {
+  grid-template-columns: 1fr 120px;
+}
+
+.proxy-field label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.proxy-field input {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-white);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.proxy-field input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.proxy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.proxy-actions .btn-primary {
+  margin-left: auto;
+}
+
+.proxy-note {
+  margin: 0.75rem 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.proxy-note.dirty {
+  color: var(--warning);
+}
+
+.proxy-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius);
+  font-size: 0.8125rem;
+}
+
+.proxy-result.ok {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.proxy-result.fail {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+}
+
+.proxy-result-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+}
+
+.proxy-direct {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 0.75rem;
+}

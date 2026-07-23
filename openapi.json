@@ -25,6 +25,7 @@
                 "session_qr_generated",
                 "session_connected",
                 "session_disconnected",
+                "session_proxy_updated",
                 "message_sent",
                 "message_failed",
                 "webhook_created",
@@ -557,6 +558,84 @@
           }
         },
         "summary": "Force-kill a stuck session (SIGKILL its wedged engine, then tear it down)",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{id}/proxy": {
+      "patch": {
+        "description": "Persist the per-session egress proxy from structured fields (send no host to clear it). Takes effect on the next start; restart the session to apply immediately. For a credentialed SOCKS5 proxy, OpenWA runs an in-process authenticating relay so the Chromium engine can egress through it.",
+        "operationId": "SessionController_updateProxy",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProxyDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Proxy updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Set or clear a session proxy",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{id}/proxy/verify": {
+      "post": {
+        "description": "Fetch the public IP through the session's configured proxy and compare it against the box's direct IP, confirming traffic actually leaves through the tunnel.",
+        "operationId": "SessionController_verifyProxy",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verification result"
+          },
+          "400": {
+            "description": "No proxy configured for this session"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "summary": "Verify a session egresses through its proxy",
         "tags": [
           "sessions"
         ]
@@ -1413,7 +1492,7 @@
             "description": "Session or template not found"
           }
         },
-        "summary": "Render a stored text template and send it as a text message",
+        "summary": "Render a stored template and send it. A text template sends as text; a template with a media attachment sends as that media (image/video/document/audio) with the rendered text as caption.",
         "tags": [
           "messages"
         ]
@@ -2241,7 +2320,7 @@
             }
           }
         },
-        "summary": "Create a message template for the session",
+        "summary": "Create a message template for the session (text or with a single media attachment)",
         "tags": [
           "templates"
         ]
@@ -2370,7 +2449,7 @@
             "description": "Template not found"
           }
         },
-        "summary": "Update a template",
+        "summary": "Update a template (including attaching, replacing, or removing its media)",
         "tags": [
           "templates"
         ]
@@ -2406,6 +2485,43 @@
           }
         },
         "summary": "Delete a template",
+        "tags": [
+          "templates"
+        ]
+      }
+    },
+    "/api/sessions/{sessionId}/templates/{id}/media": {
+      "get": {
+        "operationId": "TemplateController_getMedia",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "Session ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Template ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw media bytes"
+          },
+          "404": {
+            "description": "Template not found or has no media"
+          }
+        },
+        "summary": "Stream a template's media attachment (for dashboard preview)",
         "tags": [
           "templates"
         ]
@@ -6119,6 +6235,45 @@
           "name"
         ]
       },
+      "SessionProxyDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "http",
+              "https",
+              "socks4",
+              "socks5"
+            ],
+            "example": "socks5"
+          },
+          "host": {
+            "type": "string",
+            "example": "100.104.50.91"
+          },
+          "port": {
+            "type": "number",
+            "example": 1080
+          },
+          "username": {
+            "type": "string",
+            "example": "raspproxy8",
+            "nullable": true
+          },
+          "hasPassword": {
+            "type": "boolean",
+            "example": true,
+            "description": "Whether a password is stored (the value itself is never returned)."
+          }
+        },
+        "required": [
+          "type",
+          "host",
+          "port",
+          "hasPassword"
+        ]
+      },
       "SessionResponseDto": {
         "type": "object",
         "properties": {
@@ -6180,6 +6335,16 @@
             "description": "Human-readable reason for the most recent terminal engine failure (only set when status is FAILED).",
             "example": "Failed to launch the browser process: spawn /usr/bin/chromium ENOENT",
             "nullable": true
+          },
+          "proxy": {
+            "nullable": true,
+            "description": "Per-session proxy configuration (password omitted). Null when no proxy is set.",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SessionProxyDto"
+              }
+            ]
           }
         },
         "required": [
@@ -6189,6 +6354,44 @@
           "createdAt",
           "updatedAt"
         ]
+      },
+      "UpdateProxyDto": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Proxy scheme. Required when host is set.",
+            "enum": [
+              "http",
+              "https",
+              "socks4",
+              "socks5"
+            ],
+            "example": "socks5"
+          },
+          "host": {
+            "type": "string",
+            "description": "Proxy host or IP (e.g. a Tailscale IP). Leave empty to remove the proxy.",
+            "example": "100.104.50.91"
+          },
+          "port": {
+            "type": "number",
+            "description": "Proxy port.",
+            "example": 1080,
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "username": {
+            "type": "string",
+            "description": "Proxy username (optional).",
+            "example": "raspproxy8"
+          },
+          "password": {
+            "type": "string",
+            "description": "Proxy password (optional). Omit to keep the currently stored password when only editing other fields; send an empty string to clear it.",
+            "example": "s3cr3t"
+          }
+        }
       },
       "QRCodeResponseDto": {
         "type": "object",
@@ -7136,7 +7339,7 @@
           },
           "body": {
             "type": "string",
-            "description": "Template body with {{variable}} placeholders",
+            "description": "Template body with {{variable}} placeholders. Required for a text template; optional when a media attachment is provided (the body then renders as the media caption, and may be empty). The \"body required unless media is attached\" rule is enforced by the service.",
             "example": "Hi {{customer}}, your order {{orderId}} has shipped.",
             "maxLength": 4096
           },
@@ -7151,11 +7354,36 @@
             "description": "Optional footer text, appended to the rendered body",
             "example": "Reply STOP to unsubscribe.",
             "maxLength": 1024
+          },
+          "mediaType": {
+            "type": "string",
+            "description": "Attach a single media file to the template. When set, the template is sent as this media type with the rendered text as its caption. Requires mediaBase64 and mimetype.",
+            "enum": [
+              "image",
+              "video",
+              "document",
+              "audio"
+            ],
+            "example": "image"
+          },
+          "mediaBase64": {
+            "type": "string",
+            "description": "Base64-encoded media bytes (data: URI prefix accepted). Required when mediaType is set."
+          },
+          "mimetype": {
+            "type": "string",
+            "description": "MIME type of the attached media. Required when mediaType is set.",
+            "example": "image/jpeg"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Optional filename for the attached media",
+            "example": "promo.jpg",
+            "maxLength": 255
           }
         },
         "required": [
-          "name",
-          "body"
+          "name"
         ]
       },
       "TemplateResponseDto": {
@@ -7171,13 +7399,36 @@
             "type": "string"
           },
           "body": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "header": {
             "type": "string",
             "nullable": true
           },
           "footer": {
+            "type": "string",
+            "nullable": true
+          },
+          "hasMedia": {
+            "type": "boolean",
+            "description": "True when the template carries a media attachment."
+          },
+          "mediaType": {
+            "type": "string",
+            "enum": [
+              "image",
+              "video",
+              "document",
+              "audio"
+            ],
+            "nullable": true
+          },
+          "mimetype": {
+            "type": "string",
+            "nullable": true
+          },
+          "filename": {
             "type": "string",
             "nullable": true
           },
@@ -7194,7 +7445,7 @@
           "id",
           "sessionId",
           "name",
-          "body",
+          "hasMedia",
           "createdAt",
           "updatedAt"
         ]
@@ -7221,6 +7472,36 @@
             "type": "string",
             "description": "Optional footer text",
             "maxLength": 1024
+          },
+          "mediaType": {
+            "type": "string",
+            "description": "Replace the media attachment. Pass mediaType=null (with removeMedia) to clear it, or a new mediaType + mediaBase64 + mimetype to swap it. Omit these fields to leave the media unchanged.",
+            "enum": [
+              "image",
+              "video",
+              "document",
+              "audio"
+            ],
+            "example": "video"
+          },
+          "mediaBase64": {
+            "type": "string",
+            "description": "Base64-encoded media bytes. Required when replacing media (mediaType set)."
+          },
+          "mimetype": {
+            "type": "string",
+            "description": "MIME type of the attached media. Required when replacing media.",
+            "example": "video/mp4"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Optional filename for the attached media",
+            "maxLength": 255
+          },
+          "removeMedia": {
+            "type": "boolean",
+            "description": "Set true to remove the existing media attachment (turning the template back into text-only).",
+            "example": false
           }
         }
       },

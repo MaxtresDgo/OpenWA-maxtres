@@ -11,6 +11,7 @@
     "cancel": "Cancelar",
     "delete": "Eliminar",
     "create": "Crear",
+    "save": "Guardar",
     "close": "Cerrar",
     "search": "Buscar",
     "status": "Estado",
@@ -286,6 +287,28 @@
       "phoneNone": "No conectado",
       "created": "Creado",
       "lastActive": "Última actividad"
+    },
+    "proxy": {
+      "title": "Proxy",
+      "description": "Enruta el tráfico de esta sesión por un proxy de salida (por ejemplo, una IP residencial de Tailscale). Para un proxy SOCKS5 con usuario/contraseña, OpenWA levanta un relay local con autenticación para que el motor del navegador pueda usarlo.",
+      "type": "Tipo",
+      "host": "Host / IP",
+      "port": "Puerto",
+      "username": "Usuario",
+      "password": "Contraseña",
+      "optional": "opcional",
+      "passwordKeep": "•••••• (sin cambios)",
+      "verify": "Verificar salida",
+      "remove": "Quitar proxy",
+      "saveFirst": "Guarda los cambios antes de verificar.",
+      "applyHint": "Los cambios se aplican al próximo inicio; reinicia la sesión para aplicarlos ahora.",
+      "savedTitle": "Proxy guardado",
+      "savedDesc": "Reinicia la sesión para aplicar el cambio.",
+      "saveErrorTitle": "No se pudo guardar el proxy",
+      "resultOk": "El tráfico sale por el proxy — IP {{ip}}",
+      "resultSameIp": "La IP de salida ({{ip}}) es igual a la directa — el tráfico NO pasa por el proxy.",
+      "resultError": "Falló la verificación del proxy: {{error}}",
+      "directIp": "IP directa: {{ip}}"
     },
     "actions": {
       "view": "Ver",
@@ -630,6 +653,54 @@
       "deleted": "Plantilla eliminada correctamente",
       "deleteFailed": "Error al eliminar la plantilla: {{message}}",
       "copied": "Nombre de plantilla copiado"
+    },
+    "media": {
+      "label": "Adjunto multimedia",
+      "hint": "Adjunta un archivo de imagen, vídeo, documento o audio. El texto de la plantilla será su pie.",
+      "add": "Adjuntar archivo",
+      "replace": "Reemplazar archivo",
+      "remove": "Quitar multimedia",
+      "badge": "Multimedia",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "{{type}} adjunto",
+      "previewUnavailable": "La vista previa estará disponible al volver a adjuntar el archivo.",
+      "types": {
+        "image": "Imagen",
+        "video": "Vídeo",
+        "document": "Documento",
+        "audio": "Audio"
+      }
+    },
+    "send": {
+      "button": "Enviar",
+      "title": "Enviar \"{{name}}\"",
+      "mode": {
+        "chats": "Chats de la sesión",
+        "manual": "Lista / CSV"
+      },
+      "searchChats": "Buscar chats",
+      "noChats": "No se encontraron chats para esta sesión",
+      "groupTag": "Grupo",
+      "manualLabel": "Destinatarios (uno por línea)",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "Subir CSV",
+      "csvHint": "Los números se leen del archivo y se añaden a la lista de arriba para revisarlos.",
+      "recipientsSummary": "{{count}} destinatario(s)",
+      "tooMany": "Demasiados destinatarios (máx. {{max}}). Recorta la lista.",
+      "variables": "Variables",
+      "variablesHint": "Se aplican a todos los destinatarios.",
+      "confirm": "Enviar",
+      "sending": "Enviando…",
+      "progress": "{{done}}/{{total}} enviados…",
+      "toasts": {
+        "sent": "Plantilla enviada",
+        "failed": "No se pudo enviar la plantilla: {{message}}",
+        "bulkSent": "Plantilla enviada a {{sent}} de {{total}}",
+        "bulkPartial": "Enviada a {{sent}}, {{failed}} fallaron",
+        "noRecipients": "Añade al menos un destinatario"
+      },
+      "delayLabel": "Espera entre envíos (segundos)",
+      "delayHint": "Una pausa entre cada mensaje reduce el riesgo de que marquen la cuenta. Se aplica al enviar a más de un destinatario."
     }
   },
   "infrastructure": {

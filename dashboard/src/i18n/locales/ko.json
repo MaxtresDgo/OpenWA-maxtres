@@ -459,6 +459,54 @@
       "deleted": "템플릿이 삭제되었습니다",
       "deleteFailed": "템플릿 삭제 실패: {{message}}",
       "copied": "템플릿 이름이 복사되었습니다"
+    },
+    "media": {
+      "label": "미디어 첨부",
+      "hint": "이미지, 동영상, 문서 또는 오디오 파일 하나를 첨부하세요. 템플릿 텍스트가 캡션이 됩니다.",
+      "add": "파일 첨부",
+      "replace": "파일 교체",
+      "remove": "미디어 제거",
+      "badge": "미디어",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "{{type}} 첨부됨",
+      "previewUnavailable": "파일을 다시 첨부하면 미리보기를 볼 수 있습니다.",
+      "types": {
+        "image": "이미지",
+        "video": "동영상",
+        "document": "문서",
+        "audio": "오디오"
+      }
+    },
+    "send": {
+      "button": "보내기",
+      "title": "\"{{name}}\" 보내기",
+      "mode": {
+        "chats": "세션 채팅",
+        "manual": "목록 / CSV"
+      },
+      "searchChats": "채팅 검색",
+      "noChats": "이 세션에 대한 채팅이 없습니다",
+      "groupTag": "그룹",
+      "manualLabel": "수신자 (한 줄에 하나)",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "CSV 업로드",
+      "csvHint": "파일에서 번호를 읽어 위 목록에 추가하여 검토할 수 있습니다.",
+      "recipientsSummary": "수신자 {{count}}명",
+      "tooMany": "수신자가 너무 많습니다 (최대 {{max}}). 목록을 줄이세요.",
+      "variables": "변수",
+      "variablesHint": "모든 수신자에게 적용됩니다.",
+      "confirm": "보내기",
+      "sending": "보내는 중…",
+      "progress": "{{done}}/{{total}} 전송됨…",
+      "toasts": {
+        "sent": "템플릿을 보냈습니다",
+        "failed": "템플릿 전송 실패: {{message}}",
+        "bulkSent": "{{total}}명 중 {{sent}}명에게 템플릿을 보냈습니다",
+        "bulkPartial": "{{sent}}명에게 전송, {{failed}}명 실패",
+        "noRecipients": "수신자를 한 명 이상 추가하세요"
+      },
+      "delayLabel": "전송 간 지연 (초)",
+      "delayHint": "메시지 사이의 지연은 계정이 표시될 위험을 줄입니다. 수신자가 여러 명일 때 적용됩니다."
     }
   },
   "apiKeys": {

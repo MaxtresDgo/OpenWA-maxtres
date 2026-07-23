@@ -138,9 +138,11 @@ export class MessageService {
   /**
    * Resolve a stored template, render its body (with optional header/footer
    * flattened using newlines) using the supplied variables, and delegate to the
-   * existing {@link sendText} path so plugin hooks, persistence, and status
-   * tracking are reused. Throws NotFoundException when the template cannot be
-   * resolved by id or name.
+   * existing send path so plugin hooks, persistence, and status tracking are
+   * reused. A text-only template routes to {@link sendText}; a template with a
+   * media attachment loads the stored bytes and routes to the matching media
+   * send (image/video/document/audio) using the rendered text as the caption.
+   * Throws NotFoundException when the template cannot be resolved by id or name.
    */
   async sendTemplate(sessionId: string, dto: SendTemplateMessageDto): Promise<MessageResponseDto> {
     const template = await this.templateService.resolve(sessionId, {
@@ -154,7 +156,37 @@ export class MessageService {
       .map(segment => renderTemplate(segment, vars));
     const text = segments.join('\n\n');
 
-    return this.sendText(sessionId, { chatId: dto.chatId, text });
+    if (!template.mediaType || !template.mediaKey) {
+      return this.sendText(sessionId, { chatId: dto.chatId, text });
+    }
+
+    // Media template: pull the stored bytes and hand them to the same media send path a direct
+    // send-image/-video/... call uses, so caps, the sending gate, persistence, and status all apply
+    // unchanged. The rendered text becomes the caption (empty caption is fine for a media-only send).
+    const media = await this.templateService.loadMedia(template);
+    const mediaDto: SendMediaMessageDto = {
+      chatId: dto.chatId,
+      base64: media.buffer.toString('base64'),
+      mimetype: media.mimetype,
+      filename: media.filename,
+      caption: text || undefined,
+    };
+
+    switch (media.mediaType) {
+      case 'image':
+        return this.sendImage(sessionId, mediaDto);
+      case 'video':
+        return this.sendVideo(sessionId, mediaDto);
+      case 'document':
+        return this.sendDocument(sessionId, mediaDto);
+      case 'audio':
+        return this.sendAudio(sessionId, mediaDto);
+      default: {
+        // Exhaustive over TemplateMediaType; a new media kind must add a case above.
+        const unreachable: never = media.mediaType;
+        throw new BadRequestException(`Unsupported template media type: ${String(unreachable)}`);
+      }
+    }
   }
 
   async sendImage(sessionId: string, dto: SendMediaMessageDto): Promise<MessageResponseDto> {

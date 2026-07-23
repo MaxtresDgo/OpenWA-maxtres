@@ -3,6 +3,7 @@ import {
   sessionApi,
   webhookApi,
   templateApi,
+  messageApi,
   apiKeyApi,
   auditApi,
   infraApi,
@@ -172,6 +173,19 @@ export function useDeleteTemplateMutation() {
     onSuccess: (_template, params) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.templates(params.sessionId) });
     },
+  });
+}
+
+// Send a stored template to a recipient. No cache to invalidate — this produces an outbound message,
+// not a change to the template list.
+export function useSendTemplateMutation() {
+  return useMutation({
+    mutationFn: (params: { sessionId: string; chatId: string; templateId: string; vars?: Record<string, string> }) =>
+      messageApi.sendTemplate(params.sessionId, {
+        chatId: params.chatId,
+        templateId: params.templateId,
+        vars: params.vars,
+      }),
   });
 }
 

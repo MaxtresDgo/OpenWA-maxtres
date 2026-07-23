@@ -459,6 +459,54 @@
       "deleted": "Template supprimé avec succès",
       "deleteFailed": "Échec de la suppression du template : {{message}}",
       "copied": "Nom du template copié"
+    },
+    "media": {
+      "label": "Pièce jointe média",
+      "hint": "Joignez un fichier image, vidéo, document ou audio. Le texte du modèle en devient la légende.",
+      "add": "Joindre un fichier",
+      "replace": "Remplacer le fichier",
+      "remove": "Supprimer le média",
+      "badge": "Média",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "{{type}} joint",
+      "previewUnavailable": "Aperçu disponible après avoir joint à nouveau le fichier.",
+      "types": {
+        "image": "Image",
+        "video": "Vidéo",
+        "document": "Document",
+        "audio": "Audio"
+      }
+    },
+    "send": {
+      "button": "Envoyer",
+      "title": "Envoyer « {{name}} »",
+      "mode": {
+        "chats": "Discussions de la session",
+        "manual": "Liste / CSV"
+      },
+      "searchChats": "Rechercher des discussions",
+      "noChats": "Aucune discussion pour cette session",
+      "groupTag": "Groupe",
+      "manualLabel": "Destinataires (un par ligne)",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "Importer un CSV",
+      "csvHint": "Les numéros sont lus depuis le fichier et ajoutés à la liste ci-dessus pour vérification.",
+      "recipientsSummary": "{{count}} destinataire(s)",
+      "tooMany": "Trop de destinataires (max {{max}}). Réduisez la liste.",
+      "variables": "Variables",
+      "variablesHint": "Appliquées à chaque destinataire.",
+      "confirm": "Envoyer",
+      "sending": "Envoi…",
+      "progress": "{{done}}/{{total}} envoyés…",
+      "toasts": {
+        "sent": "Modèle envoyé",
+        "failed": "Échec de l'envoi du modèle : {{message}}",
+        "bulkSent": "Modèle envoyé à {{sent}} sur {{total}}",
+        "bulkPartial": "Envoyé à {{sent}}, {{failed}} échecs",
+        "noRecipients": "Ajoutez au moins un destinataire"
+      },
+      "delayLabel": "Délai entre les envois (secondes)",
+      "delayHint": "Une pause entre chaque message réduit le risque de signalement. S’applique à plusieurs destinataires."
     }
   },
   "apiKeys": {

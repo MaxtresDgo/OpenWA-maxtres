@@ -459,6 +459,54 @@
       "deleted": "範本刪除成功",
       "deleteFailed": "刪除範本失敗：{{message}}",
       "copied": "已複製範本名稱"
+    },
+    "media": {
+      "label": "媒體附件",
+      "hint": "附加一個圖片、影片、文件或音訊檔案。範本文字將作為其說明。",
+      "add": "附加檔案",
+      "replace": "更換檔案",
+      "remove": "移除媒體",
+      "badge": "媒體",
+      "current": "{{type}} · {{name}}",
+      "currentNoName": "已附加{{type}}",
+      "previewUnavailable": "重新附加檔案後可預覽。",
+      "types": {
+        "image": "圖片",
+        "video": "影片",
+        "document": "文件",
+        "audio": "音訊"
+      }
+    },
+    "send": {
+      "button": "傳送",
+      "title": "傳送「{{name}}」",
+      "mode": {
+        "chats": "工作階段對話",
+        "manual": "清單 / CSV"
+      },
+      "searchChats": "搜尋對話",
+      "noChats": "此工作階段找不到對話",
+      "groupTag": "群組",
+      "manualLabel": "收件人（每行一個）",
+      "manualPlaceholder": "521234567890\n521234567891",
+      "uploadCsv": "上載 CSV",
+      "csvHint": "將從檔案讀取號碼並加入上方清單以供檢查。",
+      "recipientsSummary": "{{count}} 個收件人",
+      "tooMany": "收件人過多（最多 {{max}}）。請縮減清單。",
+      "variables": "變數",
+      "variablesHint": "套用至每個收件人。",
+      "confirm": "傳送",
+      "sending": "傳送中…",
+      "progress": "已傳送 {{done}}/{{total}}…",
+      "toasts": {
+        "sent": "範本已傳送",
+        "failed": "傳送範本失敗：{{message}}",
+        "bulkSent": "範本已傳送給 {{total}} 中的 {{sent}}",
+        "bulkPartial": "已傳送 {{sent}}，{{failed}} 個失敗",
+        "noRecipients": "請至少加入一個收件人"
+      },
+      "delayLabel": "每次傳送間隔（秒）",
+      "delayHint": "每則訊息之間的停頓可降低被標記的風險。傳送給多個收件人時生效。"
     }
   },
   "apiKeys": {
