@@ -36,12 +36,13 @@ if ! grep -q 'whatsapp\.local' /etc/hosts; then
   echo "127.0.0.1 whatsapp.local" >> /etc/hosts
 fi
 
-# Clona el repo
+# Clona el repo (o actualiza si ya existe, para recoger cambios como el mapeo de puerto)
 openwa_path="$HOME/openwa"
 if [ ! -d "$openwa_path" ]; then
-  git clone https://github.com/rmyndharis/OpenWA "$openwa_path"
+  git clone https://github.com/z0m0dan/OpenWA "$openwa_path"
 fi
 cd "$openwa_path"
+git pull --ff-only
 
 # Configura .env
 cp -f .env.minimal .env

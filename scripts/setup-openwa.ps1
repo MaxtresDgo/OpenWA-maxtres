@@ -63,12 +63,13 @@ if (-not (Select-String -Path $hostsFile -Pattern 'whatsapp\.local' -Quiet)) {
     Add-Content -Path $hostsFile -Value "127.0.0.1 whatsapp.local"
 }
 
-# Clona el repo
+# Clona el repo (o actualiza si ya existe, para recoger cambios como el mapeo de puerto)
 $openwaPath = Join-Path $HOME "openwa"
 if (-not (Test-Path $openwaPath)) {
-    git clone https://github.com/rmyndharis/OpenWA $openwaPath
+    git clone https://github.com/z0m0dan/OpenWA $openwaPath
 }
 Set-Location $openwaPath
+git pull --ff-only
 
 # Configura .env
 Copy-Item .env.minimal .env -Force
