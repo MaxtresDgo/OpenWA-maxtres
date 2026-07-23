@@ -187,6 +187,36 @@ npm run dev
 # Swagger: http://localhost:2785/api/docs
 ```
 
+### Option C: One-line setup script (Windows/Linux)
+
+For a fresh machine with nothing installed yet. The script installs prerequisites, clones the repo to `~/openwa`, configures `.env`, and brings up `docker-compose.dev.yml` — no manual steps in between.
+
+```powershell
+# Windows (PowerShell, run as Administrator)
+irm https://raw.githubusercontent.com/z0m0dan/OpenWA/main/scripts/setup-openwa.ps1 | iex
+```
+
+```bash
+# Linux (Debian/Ubuntu)
+curl -fsSL https://raw.githubusercontent.com/z0m0dan/OpenWA/main/scripts/setup-openwa.sh | bash
+```
+
+What each script does, in order:
+
+1. Installs **Git** if missing (`apt` on Linux, `winget` on Windows).
+2. Installs **Docker** if missing — `get.docker.com` on Linux; **Docker Desktop** via `winget` on Windows, enabling **WSL2** first if needed (a reboot may be required — rerun the script afterward to continue).
+3. Waits for the Docker daemon to respond (up to 3 minutes).
+4. Adds `127.0.0.1 whatsapp.local` to the hosts file, so the app is reachable at `http://whatsapp.local` (port 80, no port suffix) instead of `http://localhost:2785`.
+5. Clones the repo to `~/openwa` (`$HOME\openwa` on Windows), or resets an existing clone to `origin/main` if it's already there — safe to rerun any time to pick up updates.
+6. Copies `.env.minimal` to `.env` and runs `docker compose -f docker-compose.dev.yml up -d --build --remove-orphans`.
+7. Waits for the app to finish starting, then prints the auto-generated admin API key from `data/.api-key` and the dashboard URL.
+
+Rerunning the script is idempotent — it updates the existing clone and restarts the stack rather than failing.
+
+**Requirements:** Linux script needs `sudo` (reads `data/.api-key`, which is root-only inside the bind mount) and a Debian/Ubuntu `apt`-based distro. Windows script needs `winget` (bundled with Windows 10 1809+ / 11) and must run as Administrator.
+
+If setup fails partway, check `docker compose -f docker-compose.dev.yml logs openwa` — see [`docs/12-troubleshooting-faq.md`](./docs/12-troubleshooting-faq.md) for common issues.
+
 ---
 
 ## 🔒 Security Architecture
