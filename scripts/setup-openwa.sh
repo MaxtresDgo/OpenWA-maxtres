@@ -52,12 +52,17 @@ cp -f .env.minimal .env
 # Levanta el proyecto (sin API_MASTER_KEY: OpenWA genera una admin key sola en el primer arranque)
 $COMPOSE -f docker-compose.dev.yml up -d --build --remove-orphans
 
-# La key generada se imprime una sola vez en el banner de arranque, con prefijo owa_k1_
+# La key completa solo se imprime en el primer arranque; en arranques posteriores el log la trunca
+# y remite a data/.api-key, así que la leemos de ahí (bind-mounted al host en ./data).
 echo "Esperando a que OpenWA genere su API key..."
 deadline=$(( $(date +%s) + 120 ))
 api_key=""
 while [ -z "$api_key" ] && [ "$(date +%s)" -le "$deadline" ]; do
-  api_key="$($COMPOSE -f docker-compose.dev.yml logs openwa 2>/dev/null | grep -oE 'owa_k1_[0-9a-f]{64}' | head -n1 || true)"
+  logs="$($COMPOSE -f docker-compose.dev.yml logs openwa 2>/dev/null)"
+  api_key="$(grep -oE 'owa_k1_[0-9a-f]{64}' <<< "$logs" | head -n1 || true)"
+  if [ -z "$api_key" ] && grep -q 'full key in data/.api-key' <<< "$logs"; then
+    api_key="$(cat data/.api-key 2>/dev/null || true)"
+  fi
   [ -z "$api_key" ] && sleep 3
 done
 

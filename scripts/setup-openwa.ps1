@@ -76,14 +76,20 @@ Copy-Item .env.minimal .env -Force
 # Levanta el proyecto (sin API_MASTER_KEY: OpenWA genera una admin key sola en el primer arranque)
 docker compose -f docker-compose.dev.yml up -d --build --remove-orphans
 
-# La key generada se imprime una sola vez en el banner de arranque, con prefijo owa_k1_
+# La key completa solo se imprime en el primer arranque; en arranques posteriores el log la trunca
+# y remite a data/.api-key, así que la leemos de ahí (bind-mounted al host en ./data).
 Write-Host "Esperando a que OpenWA genere su API key..."
 $deadline = (Get-Date).AddMinutes(2)
 $apiKey = $null
 while (-not $apiKey -and (Get-Date) -lt $deadline) {
-    $found = docker compose -f docker-compose.dev.yml logs openwa 2>$null |
-        Select-String -Pattern 'owa_k1_[0-9a-f]{64}' | Select-Object -First 1
-    if ($found) { $apiKey = $found.Matches[0].Value }
+    $logs = docker compose -f docker-compose.dev.yml logs openwa 2>$null
+    $found = $logs | Select-String -Pattern 'owa_k1_[0-9a-f]{64}' | Select-Object -First 1
+    if ($found) {
+        $apiKey = $found.Matches[0].Value
+    } elseif ($logs | Select-String -Pattern 'full key in data/\.api-key' -Quiet) {
+        $keyFile = Join-Path (Get-Location) 'data\.api-key'
+        if (Test-Path $keyFile) { $apiKey = (Get-Content $keyFile -Raw).Trim() }
+    }
     if (-not $apiKey) { Start-Sleep -Seconds 3 }
 }
 
