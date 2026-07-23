@@ -76,22 +76,24 @@ Copy-Item .env.minimal .env -Force
 # Levanta el proyecto (sin API_MASTER_KEY: OpenWA genera una admin key sola en el primer arranque)
 docker compose -f docker-compose.dev.yml up -d --build --remove-orphans
 
-# La key completa solo se imprime en el primer arranque; en arranques posteriores el log la trunca
-# y remite a data/.api-key, así que la leemos de ahí (bind-mounted al host en ./data).
-Write-Host "Esperando a que OpenWA genere su API key..."
+Write-Host "Esperando a que la aplicación termine de iniciar..."
 $deadline = (Get-Date).AddMinutes(2)
-$apiKey = $null
-while (-not $apiKey -and (Get-Date) -lt $deadline) {
+$started = $false
+while (-not $started -and (Get-Date) -lt $deadline) {
     $logs = docker compose -f docker-compose.dev.yml logs openwa 2>$null
-    $found = $logs | Select-String -Pattern 'owa_k1_[0-9a-f]{64}' | Select-Object -First 1
-    if ($found) {
-        $apiKey = $found.Matches[0].Value
-    } elseif ($logs | Select-String -Pattern 'full key in data/\.api-key' -Quiet) {
-        $keyFile = Join-Path (Get-Location) 'data\.api-key'
-        if (Test-Path $keyFile) { $apiKey = (Get-Content $keyFile -Raw).Trim() }
+    if ($logs | Select-String -Pattern 'Nest application successfully started' -Quiet) {
+        $started = $true
+    } else {
+        Start-Sleep -Seconds 3
     }
-    if (-not $apiKey) { Start-Sleep -Seconds 3 }
 }
+
+if (-not $started) {
+    throw "La app no terminó de iniciar a tiempo. Revisa: docker compose -f docker-compose.dev.yml logs openwa"
+}
+
+$keyFile = Join-Path (Get-Location) 'data\.api-key'
+$apiKey = if (Test-Path $keyFile) { (Get-Content $keyFile -Raw).Trim() } else { $null }
 
 if ($apiKey) {
     Write-Host ""
@@ -99,8 +101,5 @@ if ($apiKey) {
     Write-Host "🌐 Abre http://whatsapp.local en el navegador"
     Write-Host ""
 } else {
-    Write-Host "No se encontró la API key en los logs a tiempo. Revísala con: docker compose -f docker-compose.dev.yml logs openwa"
+    Write-Host "No se encontró data/.api-key. Revísalo manualmente."
 }
-
-Write-Host "Mostrando logs (Ctrl+C para salir)..."
-docker compose -f docker-compose.dev.yml logs -f
