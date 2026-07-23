@@ -42,7 +42,16 @@ if [ ! -d "$openwa_path" ]; then
   git clone https://github.com/z0m0dan/OpenWA "$openwa_path"
 fi
 cd "$openwa_path"
-git pull --ff-only
+# reset --hard (not pull --ff-only) so a dirty tracked file — e.g. from a previous root-owned
+# run — can never block picking up upstream changes; this must stay deterministic/replicable.
+git fetch origin
+git reset --hard origin/main
+
+# El script corre como root (sudo), así que git deja .git con dueño root; sin esto, el usuario
+# de la sesión no puede volver a hacer git fetch/pull a mano después ("Permiso denegado").
+if [ -n "${SUDO_USER:-}" ]; then
+  chown -R "$SUDO_USER:$SUDO_USER" "$openwa_path/.git"
+fi
 
 # Configura .env
 cp -f .env.minimal .env

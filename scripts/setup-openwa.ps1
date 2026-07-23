@@ -69,7 +69,10 @@ if (-not (Test-Path $openwaPath)) {
     git clone https://github.com/z0m0dan/OpenWA $openwaPath
 }
 Set-Location $openwaPath
-git pull --ff-only
+# reset --hard (not pull --ff-only) so a dirty tracked file can never block picking up upstream
+# changes; this must stay deterministic/replicable.
+git fetch origin
+git reset --hard origin/main
 
 # Configura .env
 Copy-Item .env.minimal .env -Force
