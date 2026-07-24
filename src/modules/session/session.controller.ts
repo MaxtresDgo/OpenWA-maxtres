@@ -23,6 +23,7 @@ import {
   RequestPairingCodeDto,
   PairingCodeResponseDto,
   UpdateProxyDto,
+  ChatSummaryDto,
 } from './dto';
 import { Session } from './entities/session.entity';
 import { ChatSummary } from '../../engine/interfaces/whatsapp-engine.interface';
