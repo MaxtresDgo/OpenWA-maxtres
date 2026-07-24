@@ -193,12 +193,12 @@ For a fresh machine with nothing installed yet. The script installs prerequisite
 
 ```powershell
 # Windows (PowerShell, run as Administrator)
-irm https://raw.githubusercontent.com/z0m0dan/OpenWA/main/scripts/setup-openwa.ps1 | iex
+irm https://raw.githubusercontent.com/MaxtresDgo/OpenWA-maxtres/main/scripts/setup-openwa.ps1 | iex
 ```
 
 ```bash
 # Linux (Debian/Ubuntu)
-curl -fsSL https://raw.githubusercontent.com/z0m0dan/OpenWA/main/scripts/setup-openwa.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MaxtresDgo/OpenWA-maxtres/main/scripts/setup-openwa.sh | bash
 ```
 
 What each script does, in order:
