@@ -12,7 +12,6 @@ import {
   GetObjectCommand,
   PutObjectCommand,
   DeleteObjectCommand,
-  DeleteObjectCommand,
   HeadBucketCommand,
   CreateBucketCommand,
 } from '@aws-sdk/client-s3';
