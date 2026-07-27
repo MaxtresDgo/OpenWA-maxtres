@@ -182,6 +182,11 @@ services:
     volumes:
       - openwa-data:/app/data
       - ./docker-compose.yml:/app/docker-compose.yml:ro
+      # This one repo-tracked plugin lands here read-only, so `git pull` + redeploy is enough to ship
+      # updates to it — no manual copy into the openwa-data volume needed. Mounted as a SINGLE plugin
+      # subpath (not the whole PLUGINS_DIR) so it doesn't shadow other plugins installed via the
+      # dashboard, and doesn't block the dashboard's own install/uninstall writes elsewhere in that dir.
+      - ./plugins/es-to-views-forwarder:/app/data/plugins/es-to-views-forwarder:ro
     depends_on:
       docker-proxy:
         condition: service_started

@@ -1,0 +1,20 @@
+{
+  "id": "es-to-views-forwarder",
+  "name": "ES → Views Forwarder",
+  "version": "1.0.0",
+  "type": "extension",
+  "description": "Forwards messages from a source group into a target group, sent via a chosen session.",
+  "main": "index.js",
+
+  "permissions": ["messages:send"],
+  "sessions": ["*"],
+  "hooks": ["message:received"],
+
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "sourceGroupId": { "type": "string", "title": "Source group ID (e.g. OPENWA_GROUP_ES_ID)" },
+      "targetGroupId": { "type": "string", "title": "Target group ID (e.g. OPENWA_GROUP_VIEWS_ID)" }
+    }
+  }
+}
