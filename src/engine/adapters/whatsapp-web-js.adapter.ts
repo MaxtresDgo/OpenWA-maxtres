@@ -2225,7 +2225,10 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       const url = await this.client!.getProfilePicUrl(contactId);
       return url || null;
     } catch (error) {
-      this.reportIfPageTransportError(error, 'getProfilePicture');
+      // No reportIfPageTransportError here: this is a best-effort avatar lookup (dashboard chat-list
+      // fetch), not a core client operation. A single slow/bad contactId hitting a transient Puppeteer
+      // "Execution context was destroyed" (page navigated mid-call) must not be treated as proof the
+      // whole WhatsApp session died — just hide that one avatar.
       this.logger.warn(`Failed to get profile picture for ${contactId}: ${String(error)}`);
       return null;
     }

@@ -3444,6 +3444,18 @@ describe('WhatsAppWebJsAdapter page transport error detection (wedged page fast-
     expect(adapter.getStatus()).toBe(EngineStatus.DISCONNECTED);
   });
 
+  // getProfilePicture is a best-effort dashboard avatar lookup, not a core client operation — a single
+  // bad/slow contactId hitting a transient transport error must not take the whole session down.
+  it('does not report a transport error from getProfilePicture as a disconnect', async () => {
+    const getProfilePicUrl = jest.fn().mockRejectedValue(new Error('Protocol error: Target closed'));
+    const { adapter, onDisconnected } = readyAdapter({ getProfilePicUrl });
+
+    await expect(adapter.getProfilePicture('0@c.us')).resolves.toBeNull();
+
+    expect(onDisconnected).not.toHaveBeenCalled();
+    expect(adapter.getStatus()).toBe(EngineStatus.READY);
+  });
+
   // joinGroupViaInviteCode answers 400 for every acceptInvite failure, because a refused invite is
   // indistinguishable from a page error at that call site. The 400 stays, but a dead page still has
   // to reach the liveness path rather than being reported purely as the caller's bad invite code.
