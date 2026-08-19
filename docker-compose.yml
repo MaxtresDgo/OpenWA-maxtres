@@ -219,6 +219,11 @@ services:
       - WEBHOOK_RETRY_DELAY=${WEBHOOK_RETRY_DELAY:-5000}
       - WEBHOOK_DISPATCH_CONCURRENCY=${WEBHOOK_DISPATCH_CONCURRENCY:-16}
       - WEBHOOK_DISPATCH_MAX_QUEUED=${WEBHOOK_DISPATCH_MAX_QUEUED:-1000}
+      # Tickets multimedia: decoded-byte cap for inline base64 media in the webhook payload, and the
+      # serialized-body cap it rides in. Raised from the 1 MiB app defaults so a real WhatsApp photo
+      # (~1-4 MB) reaches the tickets webhook instead of being shed to an `omitted` marker.
+      - WEBHOOK_MEDIA_INLINE_MAX_BYTES=${WEBHOOK_MEDIA_INLINE_MAX_BYTES:-20971520}
+      - WEBHOOK_MAX_PAYLOAD_BYTES=${WEBHOOK_MAX_PAYLOAD_BYTES:-28000000}
       # Rate limits. Blank values are cleared before lower-priority generated config is loaded.
       - RATE_LIMIT_SHORT_TTL=${RATE_LIMIT_SHORT_TTL:-}
       - RATE_LIMIT_SHORT_LIMIT=${RATE_LIMIT_SHORT_LIMIT:-}
@@ -227,8 +232,9 @@ services:
       - RATE_LIMIT_LONG_TTL=${RATE_LIMIT_LONG_TTL:-}
       - RATE_LIMIT_LONG_LIMIT=${RATE_LIMIT_LONG_LIMIT:-}
       # Max request body size. Base64 media sends ride in the JSON body, so the default is generous;
-      # raise this for large documents (e.g. BODY_SIZE_LIMIT=50mb). Blank keeps the app default of 25mb.
-      - BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-}
+      # raise this for large documents (e.g. BODY_SIZE_LIMIT=50mb). Raised for tickets multimedia:
+      # 20 MB decoded is ~27 MB in base64, past the app default of 25mb.
+      - BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-30mb}
       # Plugins
       - PLUGINS_DIR=${PLUGINS_DIR:-/app/data/plugins}
       # Plugin install-from-URL redirect policy (ssrf-guard): off unless the exact string 'true'.
