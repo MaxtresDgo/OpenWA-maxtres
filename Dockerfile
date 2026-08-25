@@ -23,6 +23,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy package files
 COPY package*.json ./
 
+# This stage produces only JS (dist/ + the dashboard SPA) and never launches a browser, but
+# puppeteer's postinstall downloads Chrome for Testing anyway — ~150 MB fetched and extracted into a
+# layer that nothing copies out. Harmless waste until @puppeteer/browsers v3 (see the override in
+# package.json): its zip path now shells out to a system `unzip` this stage does not install, so the
+# download turns a silent waste into a hard build failure. Skipping it is both the fix and faster.
+# PUPPETEER_SKIP_DOWNLOAD is the global switch read by getConfiguration.js; the per-browser spelling
+# would be PUPPETEER_SKIP_CHROME_DOWNLOAD (not ..._CHROMIUM_...) for puppeteer 24.
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+
 # The postinstall hook is a real file (scripts/postinstall.js), and `npm ci` fails outright when
 # a lifecycle script is missing — copy it BEFORE the install. dashboard/ and the backport patcher
 # are deliberately still absent at this point, so the hook cleanly no-ops here (dashboard deps are
