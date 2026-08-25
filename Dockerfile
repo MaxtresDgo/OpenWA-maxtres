@@ -75,6 +75,13 @@ ARG TARGETARCH
 # cost with --no-install-recommends: ~210 MB, and no new fixable CRITICAL/HIGH findings under the
 # release image scan. It is the Debian package rather than a bundled static build precisely so that
 # codec CVEs arrive through the same security stream as everything else here.
+#
+# unzip is required by the Chrome for Testing download below (amd64 only, but installed on both to
+# keep one apt list). @puppeteer/browsers v3 dropped its bundled `extract-zip` — the package that
+# carried GHSA-jmr9-qjv8-65gv, and the reason for the override pinning v3 in package.json — and now
+# shells out to the system `unzip` for .zip archives, falling back to an OPTIONAL `yauzl` dependency
+# that `npm ci --omit=dev` never installs. Without this package the build fails at the Chrome step
+# with "Extraction failed: no zip archiver is available".
 RUN apt-get update && apt-get install -y --no-install-recommends \
     $([ "$TARGETARCH" = arm64 ] && echo "chromium chromium-sandbox") \
     fonts-liberation \
@@ -101,6 +108,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     sqlite3 \
     ffmpeg \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Puppeteer to skip automatic download during npm install (we download it explicitly below)
