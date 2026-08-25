@@ -224,6 +224,13 @@ services:
       # (~1-4 MB) reaches the tickets webhook instead of being shed to an `omitted` marker.
       - WEBHOOK_MEDIA_INLINE_MAX_BYTES=${WEBHOOK_MEDIA_INLINE_MAX_BYTES:-20971520}
       - WEBHOOK_MAX_PAYLOAD_BYTES=${WEBHOOK_MAX_PAYLOAD_BYTES:-28000000}
+      # Tickets: WhatsApp addresses privacy-id senders as `<id>@lid` instead of `<phone>@c.us`, and
+      # that id is NOT a phone number — a consumer that strips the suffix gets a number matching no
+      # employee. This resolves the sender's real phone and attaches it as `senderPhone` on
+      # message.received. Defaulted ON (rather than blank-forwarded like the flags above) because
+      # without it the tickets integration cannot identify who wrote, and the app-level default is
+      # OFF — so a deployment that never sets it fails silently, which is exactly what happened.
+      - RESOLVE_LID_TO_PHONE=${RESOLVE_LID_TO_PHONE:-true}
       # Rate limits. Blank values are cleared before lower-priority generated config is loaded.
       - RATE_LIMIT_SHORT_TTL=${RATE_LIMIT_SHORT_TTL:-}
       - RATE_LIMIT_SHORT_LIMIT=${RATE_LIMIT_SHORT_LIMIT:-}

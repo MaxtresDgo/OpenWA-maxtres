@@ -59,6 +59,9 @@ uploads/
 
 # Docker
 .docker/
+# Ajustes locales del compose (nombres de servicio, extra_hosts, flags de
+# pruebas). Es por máquina y no debe llegar al despliegue.
+docker-compose.override.yml
 
 # Misc
 *.bak
