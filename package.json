@@ -147,11 +147,15 @@
             "module": "CommonJS",
             "moduleResolution": "node",
             "resolvePackageJsonExports": false,
-            "ignoreDeprecations": "6.0"
+            "ignoreDeprecations": "6.0",
+            "allowJs": true
           }
         }
       ]
     },
+    "transformIgnorePatterns": [
+      "node_modules/(?!.*@puppeteer/browsers)"
+    ],
     "moduleNameMapper": {
       "^@whiskeysockets/baileys$": "<rootDir>/../test/__mocks__/@whiskeysockets/baileys.ts",
       "^@whiskeysockets/baileys/(.*)$": "<rootDir>/../test/__mocks__/@whiskeysockets/baileys.ts",
@@ -385,6 +389,7 @@
     "shell-quote": "^1.10.0",
     "brace-expansion": "^5.0.9",
     "ip-address": "^10.4.0",
-    "js-yaml": "^5.2.2"
+    "js-yaml": "^5.2.2",
+    "@puppeteer/browsers": "^3.2.1"
   }
 }

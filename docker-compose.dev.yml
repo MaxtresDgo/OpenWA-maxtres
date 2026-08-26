@@ -94,6 +94,9 @@ services:
       # (~1-4 MB) reaches the tickets webhook instead of being shed to an `omitted` marker.
       - WEBHOOK_MEDIA_INLINE_MAX_BYTES=${WEBHOOK_MEDIA_INLINE_MAX_BYTES:-20971520}
       - WEBHOOK_MAX_PAYLOAD_BYTES=${WEBHOOK_MAX_PAYLOAD_BYTES:-28000000}
+      # Resuelve el `<id>@lid` del remitente a su teléfono real y lo adjunta como `senderPhone`.
+      # Mismo default que docker-compose.yml: sin esto el bot de tickets no identifica a nadie.
+      - RESOLVE_LID_TO_PHONE=${RESOLVE_LID_TO_PHONE:-true}
       - RATE_LIMIT_SHORT_TTL=${RATE_LIMIT_SHORT_TTL:-}
       - RATE_LIMIT_SHORT_LIMIT=${RATE_LIMIT_SHORT_LIMIT:-}
       - RATE_LIMIT_MEDIUM_TTL=${RATE_LIMIT_MEDIUM_TTL:-}
