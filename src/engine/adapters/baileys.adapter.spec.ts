@@ -10098,18 +10098,25 @@ describe('BaileysAdapter custom link preview', () => {
       const convert = jest
         .spyOn(sharp.prototype, 'toBuffer')
         .mockImplementation(() => new Promise<Buffer>(resolve => pending.push(resolve)));
-      const settle = async () => {
-        for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+      // The header read before each conversion runs on the libuv threadpool, so the calls arrive after real
+      // I/O, not after a fixed number of turns: wait for them, then leave a queued third time to show up.
+      const callsReach = async (count: number) => {
+        const deadline = Date.now() + 5_000;
+        while (convert.mock.calls.length < count) {
+          if (Date.now() > deadline) throw new Error(`expected ${count} conversions, saw ${convert.mock.calls.length}`);
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        await new Promise(resolve => setTimeout(resolve, 200));
       };
 
       try {
         const adapter = await readyAdapter();
         const sends = [1, 2, 3].map(() => sendWithImage(adapter, PNG_BYTES));
-        await settle();
+        await callsReach(2);
         expect(convert).toHaveBeenCalledTimes(2);
 
         pending.shift()!(PNG_BYTES);
-        await settle();
+        await callsReach(3);
         expect(convert).toHaveBeenCalledTimes(3);
 
         pending.splice(0).forEach(resolve => resolve(PNG_BYTES));
