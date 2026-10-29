@@ -178,7 +178,7 @@ A document sent without a `filename` is delivered under the default name `file` 
 
 ### Size Limit
 
-There is a **single shared media byte cap**, not a per-type table. A base64 (or downloaded) media blob whose **decoded** size exceeds the cap is rejected with `413 Payload Too Large`. The cap is `MEDIA_DOWNLOAD_MAX_BYTES`, default **50 MiB (52,428,800 bytes)**; the same value bounds outbound base64 sends, remote-URL downloads, and inbound media. It takes a raw byte count, not a unit string, and the gateway refuses to boot on a non-positive or non-numeric value rather than falling back silently (`50mb` would parse to 50 bytes).
+Every media send shares **one media byte cap**, not a per-type table. A base64 (or downloaded) media blob whose **decoded** size exceeds the cap is rejected with `413 Payload Too Large`. The cap is `MEDIA_DOWNLOAD_MAX_BYTES`, default **50 MiB (52,428,800 bytes)**; the same value bounds outbound base64 sends, remote-URL downloads, and inbound media. It takes a raw byte count, not a unit string, and the gateway refuses to boot on a non-positive or non-numeric value rather than falling back silently (`50mb` would parse to 50 bytes). One field has a tighter cap of its own: a `customLinkPreview` image on `send-text`, at 5 MiB or the media cap if that is lower (see **Link previews** under `send-text`).
 
 A whole request body is separately capped by `BODY_SIZE_LIMIT` (`25mb` by default), and base64 is about a third larger than the bytes it encodes, so with default settings a base64 send above roughly 18 MiB decoded is rejected with `413` by the body parser before the media cap applies. Raise `BODY_SIZE_LIMIT` to send larger base64 media, or send it by `url`.
 
@@ -1787,14 +1787,14 @@ Send a plain text message.
 
 **Request body** — `SendTextMessageDto`
 
-| Field             | Type     | Required | Constraints                              | Description                                                                                  |
-| ----------------- | -------- | -------- | ---------------------------------------- | -------------------------------------------------------------------------------------------- |
-| chatId            | string   | Yes      | non-empty, max 255, `localpart@host`     | `phone@c.us` or `groupId@g.us`                                                               |
-| text              | string   | Yes      | non-empty, max 4096                      | Message text                                                                                 |
-| mentions          | string[] | No       | array of WIDs, max 1024 of 64 characters | WIDs to @mention (e.g. `["62811@c.us"]`). See **Mentions** below                             |
-| linkPreview       | boolean  | No       | —                                        | `false` suppresses it; on Baileys `true` is required to get one. See **Link previews** below |
-| customLinkPreview | object   | No       | `{ url, title, description? }`           | Attach a preview you supply. **Baileys only.** See **Link previews** below                   |
-| quotedMessageId   | string   | No       | non-empty                                | Quote an earlier message, making this a reply. See [Quoted sends](#quoted-sends) below       |
+| Field             | Type     | Required | Constraints                                                     | Description                                                                                  |
+| ----------------- | -------- | -------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| chatId            | string   | Yes      | non-empty, max 255, `localpart@host`                            | `phone@c.us` or `groupId@g.us`                                                               |
+| text              | string   | Yes      | non-empty, max 4096                                             | Message text                                                                                 |
+| mentions          | string[] | No       | array of WIDs, max 1024 of 64 characters                        | WIDs to @mention (e.g. `["62811@c.us"]`). See **Mentions** below                             |
+| linkPreview       | boolean  | No       | —                                                               | `false` suppresses it; on Baileys `true` is required to get one. See **Link previews** below |
+| customLinkPreview | object   | No       | `{ url, title, description?, thumbnailUrl?, thumbnailBase64? }` | Attach a preview you supply. **Baileys only.** See **Link previews** below                   |
+| quotedMessageId   | string   | No       | non-empty                                                       | Quote an earlier message, making this a reply. See [Quoted sends](#quoted-sends) below       |
 
 ```json
 { "chatId": "628123456789@c.us", "text": "Hello from OpenWA!" }
@@ -1814,7 +1814,7 @@ the message can go out — so there a preview is **opt-in**:
 | `linkPreview: false` | no preview                                                            | no preview                                         |
 | unset                | asks WhatsApp Web to build a preview in-page                          | no preview                                         |
 | `linkPreview: true`  | asks WhatsApp Web to build a preview in-page                          | the gateway fetches the page itself and builds one |
-| `customLinkPreview`  | `501` — the library takes a boolean only, with no way to pass a title | preview attached verbatim, nothing fetched         |
+| `customLinkPreview`  | `501` — the library takes a boolean only, with no way to pass a title | preview attached verbatim, the page not fetched    |
 
 **How Baileys previews are generated.** Not with the library's own generator. That one delegates to
 `link-preview-js`, which carries an unfixed SSRF advisory
@@ -1829,9 +1829,33 @@ an HTTP or HTTPS session proxy the proxy resolves the name, so that window stays
 that intentionally allows an internal host lists it in `SSRF_ALLOWED_HOSTS`. A refused, slow or broken site
 yields no preview — never a failed send.
 
-`customLinkPreview` fetches **nothing at all**, so it works for URLs this server cannot reach, and it
+`customLinkPreview` never fetches the page, so it works for URLs this server cannot reach, and it
 cannot be combined with `linkPreview: false` — that asks for the opposite, and the request is
 rejected with `400` rather than guessing which half was meant.
+
+A custom preview can carry an image, which WhatsApp renders as the large card above the text:
+`thumbnailBase64`, or `thumbnailUrl`, which is the only thing a custom preview fetches. As on the media
+routes, base64 wins when both are present. The URL goes through the same SSRF-guarded loader as a
+media URL (`SSRF_ALLOWED_HOSTS`, the session proxy, no redirects), and either form is capped at 5 MiB
+(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The gateway re-encodes the image as a JPEG fitted inside
+1280x1280 (never enlarged, turned upright by its EXIF orientation, transparency made white) and uploads
+that to WhatsApp as the preview's high-quality thumbnail; Baileys is never handed the URL. A refused
+host or a failed fetch answers `400` (`503` when a fetch through the session's egress proxy fails before
+any response), an image over the cap `413`, and bytes that do not decode as an image (SVG, a truncated
+or corrupt file) `400`. Only a failed upload to WhatsApp sends the text with the preview but without
+the image, with a warning in the log.
+
+```json
+{
+  "chatId": "628123456789@c.us",
+  "text": "We just launched https://example.com/launch",
+  "customLinkPreview": {
+    "url": "https://example.com/launch",
+    "title": "We just launched",
+    "thumbnailUrl": "https://example.com/launch.jpg"
+  }
+}
+```
 
 > whatsapp-web.js's own documentation notes the flag "has no effect on multi-device accounts". Its
 > code does act on the flag, but that caveat is upstream's and is repeated here rather than
@@ -1849,7 +1873,7 @@ rejected with `400` rather than guessing which half was meant.
 
 `messageId` is the WhatsApp message id from the engine. By default (`SIMULATE_TYPING`; set it to `false` to disable) a typing indicator and a humanising pause run before the send: 500 ms plus 45 ms per character, capped at `SIMULATE_TYPING_MAX_MS` (default 5000 ms), with +/-15% jitter; the pause never exceeds that cap, jitter included.
 
-**Errors:** `400` unknown body field, validation failure, or session not active / blocked by a plugin hook · `401` missing/invalid API key · `403` key role below OPERATOR · `404` the `quotedMessageId` could not be resolved (see Quoted sends) · `500` engine error · `409` conflict or engine not ready (retryable) · `501` not supported on the active engine · `422` the `Idempotency-Key` was already used for a different request (see [Idempotent sends](#idempotent-sends)) · `503` Baileys recipient lookup failed or timed out before the operation was sent, or WhatsApp rate-limited the send (code 429: nothing was sent, the `Idempotency-Key` is freed) or timed out a query it awaits (code 408: the outcome is not proven, the key stays taken), or the connection closed before the message was written (nothing was sent, the `Idempotency-Key` is freed)
+**Errors:** `400` unknown body field, validation failure, session not active / blocked by a plugin hook, or a `customLinkPreview` image that is SSRF-blocked, cannot be fetched or does not decode (see **Link previews**) · `401` missing/invalid API key · `403` key role below OPERATOR · `404` the `quotedMessageId` could not be resolved (see Quoted sends) · `413` the `customLinkPreview` image over 5 MiB, or over `MEDIA_DOWNLOAD_MAX_BYTES` if that is lower · `500` engine error · `409` conflict or engine not ready (retryable) · `501` not supported on the active engine · `422` the `Idempotency-Key` was already used for a different request (see [Idempotent sends](#idempotent-sends)) · `503` a `customLinkPreview.thumbnailUrl` fetch through the session's egress proxy failed before any response, the proxy or the target at fault (nothing was sent, retryable); on Baileys, also when the recipient lookup failed or timed out before the operation was sent, or WhatsApp rate-limited the send (code 429: nothing was sent, the `Idempotency-Key` is freed) or timed out a query it awaits (code 408: the outcome is not proven, the key stays taken), or the connection closed before the message was written (nothing was sent, the `Idempotency-Key` is freed)
 
 ##### Quoted sends
 

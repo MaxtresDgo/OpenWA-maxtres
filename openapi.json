@@ -4532,6 +4532,16 @@
               }
             }
           },
+          "413": {
+            "description": "The `customLinkPreview` image, as decoded `thumbnailBase64` or as downloaded from `thumbnailUrl`, exceeds 5 MiB (or `MEDIA_DOWNLOAD_MAX_BYTES`, if that is lower).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "422": {
             "description": "`IDEMPOTENCY_KEY_REUSED`: the Idempotency-Key was already used with a different route or body.",
             "content": {
@@ -4553,7 +4563,7 @@
             }
           },
           "503": {
-            "description": "Baileys could not complete the recipient lookup within the request budget. On send routes, no message was handed to WhatsApp for this lookup failure. On Baileys, also when WhatsApp rate-limits the request (code 429: nothing was sent, and a keyed send frees its `Idempotency-Key`), times out a query it awaits (code 408: the outcome is not proven, and a keyed send keeps its `Idempotency-Key` taken), or the connection closes before the message is written (nothing was sent, and a keyed send frees its `Idempotency-Key`).",
+            "description": "The session routes its URL fetches through an egress proxy, and the `customLinkPreview.thumbnailUrl` fetch failed or timed out before any response arrived, so nothing was sent. The proxy or the target behind it may be at fault; the gateway cannot tell which. Without a session proxy the same failure answers `400`. Baileys could not complete the recipient lookup within the request budget. On send routes, no message was handed to WhatsApp for this lookup failure. On Baileys, also when WhatsApp rate-limits the request (code 429: nothing was sent, and a keyed send frees its `Idempotency-Key`), times out a query it awaits (code 408: the outcome is not proven, and a keyed send keeps its `Idempotency-Key` taken), or the connection closes before the message is written (nothing was sent, and a keyed send frees its `Idempotency-Key`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -20372,6 +20382,15 @@
             "description": "Preview description",
             "example": "Read the announcement.",
             "maxLength": 1024
+          },
+          "thumbnailUrl": {
+            "type": "string",
+            "description": "Preview image URL (http/https), fetched by the gateway under the same SSRF rules as a media URL. Rendered as the large preview card. At most 5 MiB.",
+            "example": "https://example.com/launch.jpg"
+          },
+          "thumbnailBase64": {
+            "type": "string",
+            "description": "Preview image as base64, with or without a data: prefix. Wins over thumbnailUrl. At most 5 MiB decoded."
           }
         },
         "required": [
@@ -20412,7 +20431,7 @@
             "example": false
           },
           "customLinkPreview": {
-            "description": "Attach a preview you supply yourself, instead of one fetched from the URL. Nothing is fetched for these, so a preview can be attached even for a URL this server cannot reach. **Baileys only** — whatsapp-web.js takes a boolean and answers `501`. Cannot be combined with `linkPreview: false`, which asks for the opposite.",
+            "description": "Attach a preview you supply yourself, instead of one fetched from the URL. The page at `url` is never fetched, so a preview can be attached even for a URL this server cannot reach; only a `thumbnailUrl`, when given, is. **Baileys only** — whatsapp-web.js takes a boolean and answers `501`. Cannot be combined with `linkPreview: false`, which asks for the opposite.",
             "allOf": [
               {
                 "$ref": "#/components/schemas/CustomLinkPreviewDto"

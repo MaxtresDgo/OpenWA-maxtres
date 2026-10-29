@@ -218,12 +218,17 @@ class GroupJoinInfo(TypedDict):
 
 
 class CustomLinkPreview(TypedDict):
-    """A caller-supplied link preview. Nothing is fetched for these."""
+    """A caller-supplied link preview. The page is not fetched; only thumbnailUrl, when given, is."""
 
     url: str
     # Required -- WhatsApp will not render a preview without a title.
     title: str
     description: NotRequired[str]
+    # Preview image as an http(s) URL, fetched under the media SSRF rules; renders the large card.
+    # At most 5 MiB.
+    thumbnailUrl: NotRequired[str]
+    # Preview image as base64, at most 5 MiB decoded. Wins over thumbnailUrl.
+    thumbnailBase64: NotRequired[str]
 
 
 # ── Session ───────────────────────────────────────────────────────
@@ -364,9 +369,10 @@ class SendTextRequest(TypedDict):
     # whatsapp-web.js builds one in-page by default, while on Baileys a preview is OPT-IN -- it needs
     # True, because generating one is a blocking outbound fetch per URL.
     linkPreview: NotRequired[bool]
-    # Attach a preview you supply yourself instead of one fetched from the URL. Nothing is fetched,
-    # so this works even for a URL the gateway cannot reach. Baileys only -- whatsapp-web.js takes a
-    # boolean and answers 501. Cannot be combined with linkPreview=False.
+    # Attach a preview you supply yourself instead of one fetched from the URL. The page is not
+    # fetched, so this works even for a URL the gateway cannot reach; only thumbnailUrl, when given,
+    # is. Baileys only -- whatsapp-web.js takes a boolean and answers 501. Cannot be combined with
+    # linkPreview=False.
     customLinkPreview: NotRequired[CustomLinkPreview]
     # Quote an earlier message, turning this send into a reply. Engine-specific: whatsapp-web.js
     # matches the serialized message id, Baileys the raw key id of a message it has already stored.

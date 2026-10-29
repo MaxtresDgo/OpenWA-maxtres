@@ -13,6 +13,12 @@ const DEFAULT_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MEDIA_TIMEOUT_MS = 30_000;
 
 /**
+ * Cap on a custom link preview's image, URL or base64: 5 MiB. A preview image is a thumbnail, so the
+ * 50 MiB media default would let one text send pull a video-sized body into memory.
+ */
+export const LINK_PREVIEW_THUMBNAIL_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
  * Fetch remote media as a Buffer for sending, with an SSRF host guard, a byte cap, and a timeout.
  * The guard runs BEFORE any network call, so an internal/reserved URL throws `SsrfBlockedError`
  * and no outbound socket is opened. It goes through `withSafeFetch`, which pins a direct or SOCKS
@@ -40,12 +46,19 @@ const DEFAULT_MEDIA_TIMEOUT_MS = 30_000;
  * `sessionProxyUrl` is the egress proxy of the session the fetch is attributed to, or undefined for
  * a direct one. It is required rather than optional so a new call site cannot leave a proxied
  * session's fetch going direct by omission; `urlFetchProxy` applies the operator's opt-out.
+ *
+ * `opts.maxBytes` lowers the cap for a caller that needs less (a link preview's thumbnail). It only
+ * tightens: a smaller MEDIA_DOWNLOAD_MAX_BYTES still wins.
  */
 export async function loadRemoteMediaBuffer(
   url: string,
   sessionProxyUrl: string | undefined,
+  opts: { maxBytes?: number } = {},
 ): Promise<{ data: Buffer; mimetype: string }> {
-  const maxBytes = positiveIntFromEnv('MEDIA_DOWNLOAD_MAX_BYTES', DEFAULT_MEDIA_MAX_BYTES);
+  const maxBytes = Math.min(
+    opts.maxBytes ?? Number.POSITIVE_INFINITY,
+    positiveIntFromEnv('MEDIA_DOWNLOAD_MAX_BYTES', DEFAULT_MEDIA_MAX_BYTES),
+  );
   const timeoutMs = positiveIntFromEnv('MEDIA_DOWNLOAD_TIMEOUT_MS', DEFAULT_MEDIA_TIMEOUT_MS);
 
   // Always guarded (media SSRF is independent of the webhook opt-out); withSafeFetch validates the

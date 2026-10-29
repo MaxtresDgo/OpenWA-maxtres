@@ -34,7 +34,7 @@ import {
   setBaileysText,
   storedKeyInChatPersisted,
 } from './baileys-message-mapper';
-import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
+import { LINK_PREVIEW_THUMBNAIL_MAX_BYTES, loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
 import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
@@ -187,11 +187,38 @@ export async function assertReadableImage(data: Buffer): Promise<void> {
 export const MAX_STICKER_FRAMES = 500;
 
 /**
- * Conversions running at once, process-wide. Each sharp call (the frame scan, then the pipeline)
- * holds a libuv threadpool worker (4 by default) for its whole run, and that pool also serves fs,
- * dns.lookup, crypto and zlib.
+ * Image conversions (stickers and link preview images) running at once, process-wide. Each sharp call
+ * (a sticker's frame scan, then the pipeline) holds a libuv threadpool worker (4 by default) for its
+ * whole run, and that pool also serves fs, dns.lookup, crypto and zlib.
  */
-const stickerConversions = new ConcurrencyLimiter(2);
+const imageConversions = new ConcurrencyLimiter(2);
+
+/**
+ * Re-encode a link preview image as the JPEG Baileys labels it (it stamps image/jpeg on any input),
+ * fitted inside 1280x1280 without enlarging and turned upright by its EXIF orientation, so a
+ * multi-megabyte original is not what every recipient downloads. JPEG has no alpha, so transparency
+ * becomes white rather than libvips' default black. The decode reads the whole file, which refuses a
+ * truncated or corrupt one that a header read lets through.
+ */
+async function toPreviewJpeg(data: Buffer): Promise<Buffer> {
+  // A sharp that cannot load uploads the original as it is, as before this re-encode existed.
+  const sharp = await loadSharp().catch(() => undefined);
+  if (!sharp) return data;
+  try {
+    return await imageConversions.run(() =>
+      sharp(data)
+        .rotate()
+        .flatten({ background: '#ffffff' })
+        .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 80 })
+        .toBuffer(),
+    );
+  } catch (error) {
+    throw new BadRequestException(
+      `The picture could not be read as an image (SVG is not accepted): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
   if (isWebpBuffer(data)) {
@@ -213,7 +240,7 @@ async function toWebpSticker(data: Buffer, mimetype: string): Promise<Buffer> {
   const sharp = await loadSharp();
   try {
     const image = sharp(data, { animated: true });
-    return await stickerConversions.run(async () => {
+    return await imageConversions.run(async () => {
       // Counting frames only scans the file, so an oversized animation is refused before any decode.
       // The scan still runs on the threadpool and grows faster than the frame count, so it holds the
       // same slot as the pipeline.
@@ -319,6 +346,52 @@ export class BaileysMessaging {
     return socket;
   }
 
+  /**
+   * The thumbnail fields of a custom preview that carries an image. The bytes come from the caller's
+   * base64 or from the SSRF-guarded loader with a thumbnail-sized cap, never as a URL handed to
+   * Baileys, which would fetch it with its own unguarded client. They are re-encoded by toPreviewJpeg,
+   * and Baileys derives the inline jpegThumbnail and the dimensions from that JPEG. Uploading it as a
+   * 'thumbnail-link' is what Baileys' own preview generator does, and the uploaded
+   * `highQualityThumbnail` is what WhatsApp renders as the large card.
+   *
+   * A refused host, a failed fetch, an oversized body or bytes that do not decode as an image throw:
+   * swallowing them would hide a missing SSRF_ALLOWED_HOSTS entry behind a 200. Only a failed WhatsApp
+   * upload sends the text without the image, with a warning in the log.
+   */
+  private async previewThumbnail(
+    preview: CustomLinkPreview,
+  ): Promise<{ jpegThumbnail?: Buffer; highQualityThumbnail?: BaileysLib.proto.Message.IImageMessage }> {
+    let data: Buffer;
+    if (preview.thumbnailBase64) {
+      data = Buffer.from(preview.thumbnailBase64, 'base64');
+    } else if (preview.thumbnailUrl) {
+      ({ data } = await loadRemoteMediaBuffer(preview.thumbnailUrl, this.host.sessionProxyUrl(), {
+        maxBytes: LINK_PREVIEW_THUMBNAIL_MAX_BYTES,
+      }));
+    } else {
+      return {};
+    }
+    await assertReadableImage(data);
+    const image = await toPreviewJpeg(data);
+    const lib = await this.host.loadLib();
+    try {
+      const { imageMessage } = await lib.prepareWAMessageMedia(
+        { image },
+        { upload: this.sock().waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+      );
+      if (!imageMessage) return {};
+      return {
+        ...(imageMessage.jpegThumbnail ? { jpegThumbnail: Buffer.from(imageMessage.jpegThumbnail) } : {}),
+        highQualityThumbnail: imageMessage,
+      };
+    } catch (error) {
+      this.host.logger.warn('Link preview image upload failed; sending the preview without it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {};
+    }
+  }
+
   async sendTextMessage(
     chatId: string,
     text: string,
@@ -352,7 +425,8 @@ export class BaileysMessaging {
       ...this.withMentions(mentions),
       ...(sendOptions?.linkPreview === true ? {} : { linkPreview: null }),
       // A caller-supplied preview short-circuits generation entirely: with the key present Baileys
-      // never calls getUrlInfo, so nothing is fetched and the metadata is used verbatim.
+      // never calls getUrlInfo, so the page is not fetched and the metadata is used verbatim. Its
+      // image, when one is given, is fetched and uploaded by previewThumbnail.
       ...(sendOptions?.customPreview
         ? {
             linkPreview: {
@@ -360,6 +434,7 @@ export class BaileysMessaging {
               'canonical-url': sendOptions.customPreview.url,
               title: sendOptions.customPreview.title,
               ...(sendOptions.customPreview.description ? { description: sendOptions.customPreview.description } : {}),
+              ...(await this.previewThumbnail(sendOptions.customPreview)),
             },
           }
         : {}),
