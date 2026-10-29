@@ -1,8 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNotEmpty, MaxLength, IsOptional, IsUrl, Matches, ValidateIf } from 'class-validator';
+import { IsString, IsNotEmpty, MaxLength, IsOptional, Matches } from 'class-validator';
+import { IsMediaUrl } from '../../../common/media/media-url';
+import { stripBase64DataUri } from '../../message/media-cap.util';
+import { ToStrictString } from '../../../common/utils/strict-boolean';
 
 export class SetProfileNameDto {
   @ApiProperty({ description: 'New display name (WhatsApp limit: 25 characters)', maxLength: 25 })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(25)
@@ -14,6 +18,7 @@ export class SetProfileStatusDto {
     description: 'New about/status text (may be empty to clear it; WhatsApp limit: 139 characters)',
     maxLength: 139,
   })
+  @ToStrictString()
   @IsString()
   @MaxLength(139)
   status!: string;
@@ -29,16 +34,17 @@ export class SetProfilePictureDto {
     example: 'https://example.com/avatar.jpg',
   })
   @IsOptional()
-  @IsUrl()
-  @ValidateIf((o: SetProfilePictureDto) => !o.base64)
+  // base64 wins when it holds data; a base64 that is only a data-URI prefix strips to nothing, and then
+  // the url is what gets sent, so it is checked.
+  @IsMediaUrl<SetProfilePictureDto>({ ignoreWhen: o => !!stripBase64DataUri(o.base64) })
   url?: string;
 
   @ApiPropertyOptional({
     description: 'Base64 encoded image data',
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
-  @ValidateIf((o: SetProfilePictureDto) => !o.url)
   base64?: string;
 
   @ApiPropertyOptional({
@@ -46,6 +52,7 @@ export class SetProfilePictureDto {
     example: 'image/jpeg',
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   // A profile picture is an image by definition — fail non-image mimetypes fast (400) instead of
   // letting the engine reject (or worse, accept) an arbitrary payload.

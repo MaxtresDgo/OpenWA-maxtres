@@ -58,15 +58,23 @@ class MessagesTest extends TestCase
         $backend = (new MockBackend())->on(200, [
             'messages' => [['id' => 'm1', 'body' => 'hi', 'chatId' => 'a@c.us']],
             'total' => 1,
+            'unknownTimestampTotal' => 2,
         ]);
         $client = $backend->makeClient();
-        $page = $client->messages->list('s1', ['limit' => 10]);
+        $page = $client->messages->list('s1', [
+            'limit' => 10, 'since' => 1789855200000.5, 'until' => 1789941600000,
+            'direction' => 'incoming', 'orderBy' => 'timestamp', 'type' => 'image', 'messageId' => 'M1',
+        ]);
         $this->assertArrayHasKey('messages', $page);
         $this->assertIsArray($page['messages']);
         $this->assertSame('m1', $page['messages'][0]['id']);
         $this->assertSame(1, $page['total']);
         $this->assertStringContainsString('/messages', $backend->lastCall()['path']);
         $this->assertStringContainsString('limit=10', $backend->lastCall()['query']);
+        foreach (['since=1789855200000.5', 'until=1789941600000', 'direction=incoming', 'orderBy=timestamp', 'type=image', 'messageId=M1'] as $field) {
+            $this->assertStringContainsString($field, $backend->lastCall()['query']);
+        }
+        $this->assertSame(2, $page['unknownTimestampTotal']);
     }
 
     public static function mediaSegments(): array
@@ -96,17 +104,61 @@ class MessagesTest extends TestCase
         $backend = new MockBackend();
         $backend->on(201, ['messageId' => 'm', 'timestamp' => 1]);
         $backend->on(201, ['messageId' => 'm', 'timestamp' => 1]);
+        $backend->on(201, ['messageId' => 'm', 'timestamp' => 1]);
         $backend->on(200, ['success' => true]);
         $backend->on(200, ['success' => true]);
         $client = $backend->makeClient();
         $client->messages->reply('s', ['chatId' => 'a@c.us', 'quotedMessageId' => 'q', 'text' => 'r']);
         $this->assertStringContainsString('/messages/reply', $backend->calls()[0]['url']);
+        $client->messages->clickButton('s', ['chatId' => 'a@c.us', 'messageId' => 'p', 'buttonId' => 'yes', 'text' => 'Sim']);
+        $this->assertStringContainsString('/messages/click-button', $backend->calls()[1]['url']);
         $client->messages->forward('s', ['fromChatId' => 'a@c.us', 'toChatId' => 'b@c.us', 'messageId' => 'm']);
-        $this->assertStringContainsString('/messages/forward', $backend->calls()[1]['url']);
+        $this->assertStringContainsString('/messages/forward', $backend->calls()[2]['url']);
         $client->messages->react('s', ['chatId' => 'a@c.us', 'messageId' => 'm', 'emoji' => '👍']);
-        $this->assertStringContainsString('/messages/react', $backend->calls()[2]['url']);
+        $this->assertStringContainsString('/messages/react', $backend->calls()[3]['url']);
         $client->messages->delete('s', ['chatId' => 'a@c.us', 'messageId' => 'm']);
-        $this->assertStringContainsString('/messages/delete', $backend->calls()[3]['url']);
+        $this->assertStringContainsString('/messages/delete', $backend->calls()[4]['url']);
+    }
+
+    /**
+     * This client takes an untyped array, so nothing here checks the shape at compile time — the
+     * body assertion is the only thing standing between a caller and a silently dropped key.
+     */
+    public function testQuotedMessageIdReachesTheBodyOnEverySend(): void
+    {
+        $backend = new MockBackend();
+        foreach (range(1, 5) as $ignored) {
+            $backend->on(201, ['messageId' => 'm', 'timestamp' => 1]);
+        }
+        $client = $backend->makeClient();
+
+        $client->messages->sendText('s', ['chatId' => 'a@c.us', 'text' => 'hi', 'quotedMessageId' => 'q1']);
+        $client->messages->sendImage('s', ['chatId' => 'a@c.us', 'url' => 'http://u', 'quotedMessageId' => 'q1']);
+        $client->messages->sendLocation(
+            's',
+            ['chatId' => 'a@c.us', 'latitude' => 1, 'longitude' => 2, 'quotedMessageId' => 'q1']
+        );
+        $client->messages->sendContact(
+            's',
+            ['chatId' => 'a@c.us', 'contactName' => 'A', 'contactNumber' => '628', 'quotedMessageId' => 'q1']
+        );
+        $client->messages->sendPoll(
+            's',
+            ['chatId' => 'a@c.us', 'name' => 'Q', 'options' => ['a', 'b'], 'quotedMessageId' => 'q1']
+        );
+
+        foreach ($backend->calls() as $call) {
+            $this->assertSame('q1', $call['body']['quotedMessageId'] ?? null, $call['url']);
+        }
+    }
+
+    public function testOrdinarySendCarriesNoQuoteKey(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(201, ['messageId' => 'm', 'timestamp' => 1]);
+        $backend->makeClient()->messages->sendImage('s', ['chatId' => 'a@c.us', 'url' => 'http://u']);
+
+        $this->assertArrayNotHasKey('quotedMessageId', $backend->lastCall()['body']);
     }
 
     public function testEditMessageUsesEditPath(): void

@@ -8,6 +8,7 @@ const path = require('path');
 
 const {
   applyStatusPatches,
+  isApplied,
   GATING_FIND,
   GATING_REPLACE,
   MEDIA_DATA_FIND,
@@ -52,6 +53,15 @@ test('applies both repairs to a pristine upstream tree', () => {
   for (const needle of [GATING_FIND, MEDIA_DATA_FIND, MEDIA_SEND_FIND]) {
     assert.ok(!patched.includes(needle));
   }
+});
+
+/** Both groups are independent, so the predicate only reads as applied once each one has landed. */
+test('isApplied tracks the transform: false on a pristine tree, true once patched', () => {
+  const { dir } = fakeWwjs(PRISTINE);
+
+  assert.equal(isApplied(dir), false);
+  applyStatusPatches(dir);
+  assert.equal(isApplied(dir), true);
 });
 
 test('is idempotent — a second run is a no-op, not a double patch', () => {
@@ -155,6 +165,7 @@ test('CLI: unrecognised tree exits 1 bare and 0 under --best-effort', () => {
   fs.mkdirSync(path.join(root, 'scripts'));
   const script = path.join(root, 'scripts', 'patch-wwebjs-status.js');
   fs.copyFileSync(path.join(__dirname, 'patch-wwebjs-status.js'), script);
+  fs.copyFileSync(path.join(__dirname, 'atomic-write.js'), path.join(path.dirname(script), 'atomic-write.js'));
   const utilsDir = path.join(root, 'node_modules', 'whatsapp-web.js', 'src', 'util', 'Injected');
   fs.mkdirSync(utilsDir, { recursive: true });
   fs.writeFileSync(path.join(utilsDir, 'Utils.js'), 'exports.x = () => {};\n');

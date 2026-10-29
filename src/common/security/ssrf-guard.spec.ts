@@ -36,6 +36,10 @@ describe('isBlockedAddress', () => {
     ['192.168.1.1', 'RFC1918 192.168/16'],
     ['169.254.169.254', 'link-local / cloud metadata'],
     ['100.64.0.1', 'CGNAT 100.64/10'],
+    ['192.0.0.8', 'IETF protocol assignments 192.0.0.0/24'],
+    ['198.19.255.255', 'benchmarking 198.18.0.0/15, upper end'],
+    ['224.0.0.1', 'IPv4 multicast 224.0.0.0/4'],
+    ['255.255.255.255', 'reserved 240.0.0.0/4, broadcast'],
     ['0.0.0.0', 'unspecified'],
     ['::1', 'IPv6 loopback'],
     ['fc00::1', 'IPv6 ULA fc00::/7'],
@@ -43,6 +47,11 @@ describe('isBlockedAddress', () => {
     ['fe80::1', 'IPv6 link-local'],
     ['fec0::1', 'IPv6 site-local fec0::/10 (deprecated, RFC 3879)'],
     ['feff::1', 'IPv6 site-local upper bound feff'],
+    ['fc0::1', 'IETF-reserved 0000::/3 — not ULA despite the fc prefix'],
+    ['fe8::1', 'IETF-reserved 0000::/3 — not link-local despite the fe prefix'],
+    ['ff02::1', 'IPv6 multicast ff00::/8 (all-nodes) — same posture as IPv4 224.0.0.0/4'],
+    ['4000::1', 'reserved above the 2000::/3 global-unicast range (4000::/3)'],
+    ['e000::1', 'reserved above the 2000::/3 global-unicast range (e000::/3)'],
     ['::ffff:127.0.0.1', 'IPv4-mapped loopback (dotted)'],
     ['::ffff:7f00:1', 'IPv4-mapped loopback (hex)'],
     ['::ffff:0a00:0001', 'IPv4-mapped RFC1918 (hex, zero-padded)'],
@@ -50,6 +59,9 @@ describe('isBlockedAddress', () => {
     ['64:ff9b::a9fe:a9fe', 'NAT64 of cloud metadata 169.254.169.254'],
     ['64:ff9b::7f00:1', 'NAT64 of loopback 127.0.0.1'],
     ['64:ff9b::127.0.0.1', 'NAT64 of loopback (dotted tail)'],
+    ['64:ff9b:1::7f00:1', 'local-use NAT64 /96 of loopback 127.0.0.1'],
+    ['64:ff9b:1:7f00:0:100:808:808', 'local-use NAT64 /48 layout embedding loopback 127.0.0.1'],
+    ['64:ff9b:1:a00:0:100:808:808', 'local-use NAT64 /48 layout embedding RFC1918 10.0.0.1'],
     ['2002:7f00:1::', '6to4 of loopback 127.0.0.1'],
     ['2002:a9fe:a9fe::', '6to4 of cloud metadata 169.254.169.254'],
     ['2002:0a00:0001::', '6to4 of RFC1918 10.0.0.1'],
@@ -73,9 +85,13 @@ describe('isBlockedAddress', () => {
     ['1.1.1.1', 'public IPv4'],
     ['172.32.0.1', 'just outside 172.16/12'],
     ['2001:4860:4860::8888', 'public IPv6'],
+    ['2606:4700::1111', 'public IPv6 in 2000::/3 (RFC 4291 global unicast) stays allowed'],
+    ['64:ff9b::8.8.8.8', 'NAT64 of public 8.8.8.8 (dotted tail) stays allowed via the ladder'],
     ['::ffff:0808:0808', 'IPv4-mapped public 8.8.8.8 (hex)'],
+    ['::ffff:8.8.8.8', 'IPv4-mapped public 8.8.8.8 (dotted) — the reserved-block catch must not swallow it'],
     ['2002:0808:0808::', '6to4 of public 8.8.8.8 stays allowed'],
     ['64:ff9b::0808:0808', 'NAT64 of public 8.8.8.8 stays allowed'],
+    ['64:ff9b:1::808:808', 'local-use NAT64 /96 of public 8.8.8.8 stays allowed'],
     ['::ffff:0:0808:0808', 'IPv4-translatable public 8.8.8.8 stays allowed'],
     ['0:0:0:0:0:ffff:0808:0808', 'fully-expanded IPv4-mapped public 8.8.8.8 stays allowed (hex)'],
     ['0:0:0:0:0:ffff:8.8.8.8', 'fully-expanded IPv4-mapped public 8.8.8.8 stays allowed (dotted)'],
@@ -120,6 +136,7 @@ describe('assertSafeFetchUrl — SSRF_ALLOWED_HOSTS escape-hatch', () => {
 
   it('allows an internal host that is explicitly allowlisted (case-insensitive)', async () => {
     process.env.SSRF_ALLOWED_HOSTS = 'Localhost, minio';
+    (dnsPromises.lookup as jest.Mock).mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
     await expect(assertSafeFetchUrl('http://localhost:9000/bucket/x.png')).resolves.toBeUndefined();
     await expect(assertSafeFetchUrl('http://minio:9000/x.png')).resolves.toBeUndefined();
   });
@@ -192,9 +209,15 @@ describe('resolveSafeFetchTarget', () => {
     await expect(resolveSafeFetchTarget('https://8.8.8.8/hook')).resolves.toBeNull();
   });
 
-  it('returns null for an allowlisted host (trusted, no pin needed)', async () => {
+  it('pins an allowlisted host to its resolved addresses (exemption from the BLOCK check, not from pinning)', async () => {
+    // The rebinding window: validation resolves the name, then fetch re-resolves — and a rebind
+    // flips the second answer. Allowlisted hosts now return their resolved addresses so the
+    // connection is pinned to exactly what was vetted, like every other DNS name.
     process.env.SSRF_ALLOWED_HOSTS = 'minio';
-    await expect(resolveSafeFetchTarget('http://minio:9000/x.png')).resolves.toBeNull();
+    (dnsPromises.lookup as jest.Mock).mockResolvedValueOnce([{ address: '10.0.0.9', family: 4 }]);
+    await expect(resolveSafeFetchTarget('http://minio:9000/x.png')).resolves.toEqual([
+      { address: '10.0.0.9', family: 4 },
+    ]);
   });
 
   it('throws for a blocked literal address', async () => {
@@ -234,6 +257,23 @@ describe('resolveSafeFetchTarget', () => {
       else process.env.SSRF_DNS_TIMEOUT_MS = prev;
     }
   }, 1000);
+
+  it('falls back to the default deadline when SSRF_DNS_TIMEOUT_MS overflows a Node timer', async () => {
+    // Node clamps a delay above 2^31-1 ms to 1 ms, which would fail every lookup at once.
+    const prev = process.env.SSRF_DNS_TIMEOUT_MS;
+    process.env.SSRF_DNS_TIMEOUT_MS = '9999999999';
+    (dnsPromises.lookup as jest.Mock).mockReturnValueOnce(
+      new Promise(resolve => setTimeout(() => resolve([{ address: '93.184.216.34', family: 4 }]), 50)),
+    );
+    try {
+      await expect(resolveSafeFetchTarget('https://slow.example/hook')).resolves.toEqual([
+        { address: '93.184.216.34', family: 4 },
+      ]);
+    } finally {
+      if (prev === undefined) delete process.env.SSRF_DNS_TIMEOUT_MS;
+      else process.env.SSRF_DNS_TIMEOUT_MS = prev;
+    }
+  }, 1000);
 });
 
 describe('withSafeFetch (guarded + pinned fetch)', () => {
@@ -249,8 +289,8 @@ describe('withSafeFetch (guarded + pinned fetch)', () => {
 
   it('pins the connection by passing a dispatcher to fetch for a hostname target', async () => {
     // The security property: for a DNS hostname the connection MUST go through a pinned dispatcher,
-    // else fetch re-resolves DNS independently and the rebind window reopens. Removing the pin
-    // (dispatcher = undefined) makes this fail.
+    // else fetch re-resolves DNS independently and the rebind window reopens. Dropping the dispatcher
+    // fails here; the real-socket test below fails if it stops dialling the vetted address.
     (dnsPromises.lookup as jest.Mock).mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }]);
     (undiciFetch as jest.Mock).mockResolvedValue({ status: 200, type: 'basic' });
     const use = jest.fn(() => 'used');
@@ -283,8 +323,22 @@ describe('withSafeFetch (guarded + pinned fetch)', () => {
 
     expect(result).toBe('ok');
     const [, init] = (undiciFetch as jest.Mock).mock.calls[0] as [string, { redirect: string; dispatcher: unknown }];
-    expect(init.redirect).toBe('follow');
+    // disabling SSRF protection is not opting into redirect-chasing — fail loudly instead.
+    expect(init.redirect).toBe('error');
     expect(init.dispatcher).toBeUndefined();
+  });
+
+  it('an unguarded fetch follows redirects ONLY with WEBHOOK_SSRF_REDIRECTS=true', async () => {
+    (undiciFetch as jest.Mock).mockResolvedValue({ status: 200, type: 'basic' });
+    const use = jest.fn(() => 'ok');
+    process.env.WEBHOOK_SSRF_REDIRECTS = 'true';
+    try {
+      await withSafeFetch('http://10.0.0.5/hook', {}, use, { guard: false });
+      const [, init] = (undiciFetch as jest.Mock).mock.calls[0] as [string, { redirect: string }];
+      expect(init.redirect).toBe('follow');
+    } finally {
+      delete process.env.WEBHOOK_SSRF_REDIRECTS;
+    }
   });
 
   it('follows redirects hop-by-hop, re-validating each target and delivering the final 200 (download path)', async () => {
@@ -421,7 +475,7 @@ describe('withSafeFetch (guarded + pinned fetch)', () => {
     const init = {
       method: 'POST',
       body: 'payload',
-      headers: { authorization: 'Bearer secret', 'x-custom': 'keep' },
+      headers: { authorization: 'Bearer secret', cookie: 'sid=abc', 'x-custom': 'keep' },
     };
 
     await withSafeFetch('https://api.example.com/upload', init, use, { followRedirects: true });
@@ -433,6 +487,7 @@ describe('withSafeFetch (guarded + pinned fetch)', () => {
     expect(hop2.method).toBe('GET');
     expect(hop2.body).toBeUndefined();
     expect(hop2.headers?.get('authorization')).toBeNull();
+    expect(hop2.headers?.get('cookie')).toBeNull();
     expect(hop2.headers?.get('x-custom')).toBe('keep');
   });
 
@@ -743,7 +798,9 @@ describe('withSafeFetch followRedirects validates every hop over real sockets', 
   });
 
   afterEach(() => {
-    process.env.SSRF_ALLOWED_HOSTS = savedAllowedHosts;
+    // Assigning undefined to process.env stores the string 'undefined', an allowlist entry of its own.
+    if (savedAllowedHosts === undefined) delete process.env.SSRF_ALLOWED_HOSTS;
+    else process.env.SSRF_ALLOWED_HOSTS = savedAllowedHosts;
     (undiciFetch as unknown as jest.Mock).mockReset();
   });
 
@@ -807,6 +864,28 @@ describe('withSafeFetch followRedirects validates every hop over real sockets', 
     }
   });
 
+  it('connects a vetted hostname to the address it was vetted at, not a fresh resolution', async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('PINNED');
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    // `.invalid` never resolves through real DNS, so the request can only reach the server through
+    // the address the guard vetted and pinned into the dispatcher.
+    process.env.SSRF_ALLOWED_HOSTS = 'pinned.invalid';
+    (dnsPromises.lookup as jest.Mock).mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }]);
+
+    try {
+      const body = await withSafeFetch(`http://pinned.invalid:${port}/`, {}, async response => await response.text(), {
+        guard: true,
+      });
+      expect(body).toBe('PINNED');
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
   it('refuses a redirect chain longer than the hop cap', async () => {
     const server = createServer((_req, res) => {
       const port = (server.address() as AddressInfo).port;
@@ -826,5 +905,25 @@ describe('withSafeFetch followRedirects validates every hop over real sockets', 
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()));
     }
+  });
+});
+
+// OS connect errors name the receiver's host:port — internal topology that must not ride a
+// delivery-failure row out to API consumers. The code stays (actionable), the address goes.
+describe('redactSsrfError redacts network topology', () => {
+  it('strips host:port from connect errors', () => {
+    const out = redactSsrfError(new Error('connect ECONNREFUSED 10.0.0.1:443'));
+    expect(out).toContain('ECONNREFUSED');
+    expect(out).not.toContain('10.0.0.1');
+  });
+
+  it('strips host:port from DNS failures too', () => {
+    const out = redactSsrfError(new Error('getaddrinfo ENOTFOUND internal.receiver.svc.local'));
+    expect(out).toContain('ENOTFOUND');
+    expect(out).not.toContain('internal.receiver.svc.local');
+  });
+
+  it('leaves ordinary operator-actionable messages untouched', () => {
+    expect(redactSsrfError(new Error('socket hang up'))).toBe('socket hang up');
   });
 });

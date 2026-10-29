@@ -18,6 +18,60 @@
   margin-bottom: 0.75rem;
 }
 
+.webhooks-page .modal-body > .hint {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: -0.375rem 0 0.75rem;
+}
+
+.webhooks-page .modal-body > .hint.error {
+  color: var(--error-text);
+}
+
+.webhooks-page .webhook-auth {
+  margin-bottom: 0.75rem;
+}
+
+.webhooks-page .webhook-auth > label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.webhooks-page .webhook-auth > label.webhook-auth-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 400;
+  color: var(--text-primary);
+}
+
+.webhooks-page .webhook-auth > .hint.error {
+  font-size: 0.75rem;
+  color: var(--error-text);
+}
+
+.webhooks-page .secret-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.webhooks-page .secret-row input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.webhooks-page .header-row input {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 2.25rem;
+  padding: 0 0.625rem;
+  font-size: 0.8125rem;
+}
+
 .webhooks-page .modal-body > .event-tags {
   display: flex;
   flex-wrap: wrap;
@@ -79,7 +133,7 @@
 }
 
 .webhooks-page .webhook-url-icon {
-  color: var(--primary);
+  color: var(--primary-text);
   flex-shrink: 0;
 }
 
@@ -92,7 +146,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono Variable', 'JetBrains Mono', monospace;
 }
 
 .webhooks-page .webhook-card-actions {
@@ -177,13 +231,13 @@
   font-size: 0.75rem;
   padding: 0.25rem 0.625rem;
   background: rgba(37, 211, 102, 0.15);
-  color: var(--primary);
+  color: var(--primary-text);
   border-radius: 6px;
   font-weight: 600;
   white-space: nowrap;
   border: 1px solid rgba(37, 211, 102, 0.25);
   cursor: default;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono Variable', 'JetBrains Mono', monospace;
   letter-spacing: -0.01em;
 }
 
@@ -204,12 +258,12 @@
 
 .webhooks-page .modal-body .event-tag:hover {
   border-color: var(--primary);
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 .webhooks-page .modal-body .event-tag.selected {
   background: var(--primary);
-  color: white;
+  color: #0f172a;
   border-color: var(--primary);
 }
 
@@ -229,13 +283,13 @@
 [data-theme='dark'] .webhooks-page .modal-body .event-tag:hover,
 :root:not([data-theme='light']) .webhooks-page .modal-body .event-tag:hover {
   border-color: var(--primary);
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 [data-theme='dark'] .webhooks-page .modal-body .event-tag.selected,
 :root:not([data-theme='light']) .webhooks-page .modal-body .event-tag.selected {
   background: var(--primary);
-  color: white;
+  color: #0f172a;
   border-color: var(--primary);
 }
 
@@ -259,9 +313,14 @@
   outline: none;
 }
 
-.webhooks-page .filter-badge-interactive:hover,
-.webhooks-page .filter-badge-interactive:focus-visible {
+.webhooks-page .filter-badge-interactive:hover {
   border-color: var(--primary);
+  color: var(--text-primary);
+}
+
+/* The badge takes no ring, so its border is the focus cue and has to be the contrast token, not the brand fill. */
+.webhooks-page .filter-badge-interactive:focus-visible {
+  border-color: var(--focus-ring);
   color: var(--text-primary);
 }
 
@@ -270,7 +329,8 @@
   position: fixed;
   z-index: 100;
   min-width: 200px;
-  max-width: 340px;
+  /* 16px of the viewport stay free: FilterBadge pulls the popover back from the screen edges by 8px each. */
+  max-width: min(340px, calc(100vw - 16px));
   padding: 0.5rem 0.625rem;
   background: var(--bg-white);
   border: 1px solid var(--border);
@@ -327,7 +387,7 @@
 
 .webhooks-page .status-badge.active {
   background: rgba(37, 211, 102, 0.15);
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 .webhooks-page .status-badge.inactive {
@@ -354,7 +414,7 @@
 .webhooks-page .icon-btn.danger:hover {
   background: rgba(239, 68, 68, 0.12);
   border-color: rgba(239, 68, 68, 0.3);
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .webhooks-page .events-reference {
@@ -389,7 +449,7 @@
 
 .webhooks-page .event-item code {
   font-size: 0.8125rem;
-  color: var(--primary);
+  color: var(--primary-text);
   background: rgba(37, 211, 102, 0.1);
   padding: 0.25rem 0.5rem;
   border-radius: 4px;
@@ -522,59 +582,6 @@
   }
 }
 
-/* Toast Notification */
-.webhooks-page .toast {
-  position: fixed;
-  top: 1.5rem;
-  right: 1.5rem;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 1rem 1.25rem;
-  border-radius: 10px;
-  font-size: 0.875rem;
-  font-weight: 500;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-  z-index: 1000;
-  animation: slideIn 0.3s ease;
-}
-
-@keyframes slideIn {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-.webhooks-page .toast.success {
-  background: rgba(37, 211, 102, 0.12);
-  border: 1px solid rgba(37, 211, 102, 0.3);
-  color: var(--success);
-}
-
-.webhooks-page .toast.error {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: var(--error);
-}
-
-.webhooks-page .toast-close {
-  background: transparent;
-  border: none;
-  padding: 0.25rem;
-  cursor: pointer;
-  opacity: 0.6;
-  color: inherit;
-}
-
-.webhooks-page .toast-close:hover {
-  opacity: 1;
-}
-
 /* Danger Button */
 /* Small Modal Variant */
 .webhooks-page .modal.modal-sm {
@@ -663,13 +670,18 @@
   transform: translateX(22px);
 }
 
+.webhooks-page .toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .webhooks-page .toggle-status {
   font-size: 0.875rem;
   font-weight: 500;
 }
 
 .webhooks-page .toggle-status.active {
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 .webhooks-page .toggle-status.inactive {

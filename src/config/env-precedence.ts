@@ -23,6 +23,17 @@
  */
 export const BLANK_SHADOWED_ENV_KEYS: string[] = [
   'ENGINE_TYPE',
+  // Inbound-media knobs. Not dashboard-managed, but every blank compose forward must be cleared or
+  // the empty value shadows .env / data/.env.generated — which is why the gate above requires an
+  // entry for each one.
+  'MESSAGE_LIST_INLINE_MEDIA_BUDGET_BYTES',
+  'MEDIA_DOWNLOAD_ENABLED',
+  'MEDIA_DOWNLOAD_MAX_BYTES',
+  'MEDIA_DOWNLOAD_TIMEOUT_MS',
+  'INBOUND_MEDIA_CONCURRENCY',
+  'INBOUND_MEDIA_GLOBAL_CONCURRENCY',
+  // Whether a caller-supplied URL is fetched through the named session's egress proxy.
+  'SESSION_PROXY_URL_FETCH',
   // Database selection + connection details (#488)
   'DATABASE_TYPE',
   'DATABASE_HOST',
@@ -32,10 +43,14 @@ export const BLANK_SHADOWED_ENV_KEYS: string[] = [
   'DATABASE_PASSWORD',
   // PostgreSQL schema (dashboard-managed + compose blank-forwarded, like the other DATABASE_* keys)
   'POSTGRES_SCHEMA',
+  // PostgreSQL TLS, same arrangement: a blank forward must not pin a dashboard-saved value off.
+  'DATABASE_SSL',
+  'DATABASE_SSL_REJECT_UNAUTHORIZED',
   // Storage selection + S3 details (#488)
   'STORAGE_TYPE',
   'STORAGE_LOCAL_PATH',
   'S3_BUCKET',
+  'S3_KEY_PREFIX',
   'S3_ENDPOINT',
   'S3_REGION',
   'S3_ACCESS_KEY_ID',
@@ -47,8 +62,10 @@ export const BLANK_SHADOWED_ENV_KEYS: string[] = [
   // Chat-media archiving. Blank-forwarded by compose like the storage keys above, so an operator
   // who sets nothing must not have an empty string pin the feature off against data/.env.generated.
   'CHAT_MEDIA_ARCHIVE_ENABLED',
+  'CHAT_MEDIA_ARCHIVE_OUTBOUND',
   'CHAT_MEDIA_ARCHIVE_MAX_BYTES',
   'CHAT_MEDIA_ARCHIVE_TTL_DAYS',
+  'MESSAGE_INLINE_MEDIA',
   'CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS',
   'CHAT_MEDIA_ORPHAN_GRACE_MS',
   // Send pacing. Blank-forwarded by compose like the chat-media keys, so an operator who sets
@@ -75,6 +92,24 @@ export const BLANK_SHADOWED_ENV_KEYS: string[] = [
   // Autoreply rule cap, blank-forwarded like the knobs above so an operator who sets nothing does
   // not have an empty string shadow a value in .env / data/.env.generated.
   'AUTOMATION_MAX_PER_SESSION',
+  // Behaviour flags with no dashboard route: before they were forwarded, a value set in .env simply
+  // never reached the container. They are blank-forwarded like everything else here so the forward
+  // itself cannot pin them off.
+  'WEBHOOK_CONTACT_DETAILS',
+  'BAILEYS_MARK_ONLINE_ON_CONNECT',
+  'BAILEYS_SYNC_FULL_HISTORY',
+  'BAILEYS_WA_VERSION',
+  'ALLOW_UNSIGNED_INGRESS',
+  'STORE_EPHEMERAL_MESSAGES',
+  'RESOLVE_LID_TO_PHONE',
+  'SIMULATE_TYPING',
+  'MCP_ENABLED',
+  'SEARCH_ENABLED',
+  'SEARCH_CONTAINS_ENABLED',
+  'SERVE_DASHBOARD',
+  'CACHE_ENABLED',
+  'DATABASE_LOGGING',
+  'MAIN_DATABASE_SYNCHRONIZE',
   // Redis selection + connection details (#488)
   'REDIS_ENABLED',
   'REDIS_HOST',
@@ -85,6 +120,7 @@ export const BLANK_SHADOWED_ENV_KEYS: string[] = [
   'PUPPETEER_HEADLESS',
   'SESSION_DATA_PATH',
   'PUPPETEER_ARGS',
+  'PUPPETEER_PROTOCOL_TIMEOUT_MS',
   // Rate-limit values are blank-forwarded by Compose so a host value can take precedence without an
   // empty forward masking the lower-priority loaded .env / data/.env.generated value.
   'RATE_LIMIT_SHORT_TTL',
@@ -107,6 +143,113 @@ export const BLANK_SHADOWED_ENV_KEYS: string[] = [
   'WWEBJS_WEB_VERSION',
   'WWEBJS_WEB_VERSION_REMOTE_PATH',
   'WWEBJS_AUTH_TIMEOUT_MS',
+  // The remainder of the documented knob set, forwarded blank once the compose forwarding list was
+  // completed (compose-parity.spec.ts now derives the required forwards from .env.example, so every
+  // entry here exists because a `${KEY:-}` line renders blank when the operator sets nothing).
+  'ALLOW_DEV_API_KEY',
+  'API_KEY_PEPPER',
+  'BOOTSTRAP_KEY_FILE',
+  'ENABLE_SWAGGER',
+  'VALIDATION_ERROR_DETAIL',
+  'MCP_READONLY',
+  'MCP_RATE_LIMIT_MAX',
+  'MCP_RATE_LIMIT_WINDOW_MS',
+  'MCP_IP_RATE_LIMIT_MAX',
+  'MCP_IP_RATE_LIMIT_WINDOW_MS',
+  'METRICS_TOKEN',
+  'CORS_ORIGINS',
+  'SSRF_ALLOWED_HOSTS',
+  'SSRF_DNS_TIMEOUT_MS',
+  'WEBHOOK_SSRF_REDIRECTS',
+  'REQUEST_TIMEOUT_MS',
+  'HEADERS_TIMEOUT_MS',
+  'KEEPALIVE_TIMEOUT_MS',
+  'INFLIGHT_BODY_BUDGET_BYTES',
+  'WEBHOOK_SHUTDOWN_DRAIN_MS',
+  'WEBHOOK_MEDIA_INLINE_MAX_BYTES',
+  'WEBHOOK_MAX_PAYLOAD_BYTES',
+  'WEBHOOK_MAX_PER_SESSION',
+  'WEBHOOK_FAILURE_RETENTION_DAYS',
+  'WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS',
+  'WEBHOOK_WORKER_CONCURRENCY',
+  'WEBHOOK_DEGRADED_SESSION_CONCURRENCY',
+  'INGRESS_INSTANCE_LIMIT',
+  'INGRESS_INSTANCE_TTL',
+  'INGRESS_IP_LIMIT',
+  'INGRESS_MAX_ATTEMPTS',
+  'INGRESS_RETRY_DELAY_MS',
+  'INGRESS_DEDUP_RETENTION_DAYS',
+  'INGRESS_RETENTION_DAYS',
+  'INGRESS_TIMESTAMP_TOLERANCE_SEC',
+  'INGRESS_RECONCILE_INTERVAL_MS',
+  'INGRESS_RECONCILE_GRACE_MS',
+  'INGRESS_RECONCILE_BATCH_SIZE',
+  'INGRESS_RECONCILE_MAX_ATTEMPTS',
+  'WEBHOOK_RECONCILE_INTERVAL_MS',
+  'WEBHOOK_RECONCILE_GRACE_MS',
+  'WEBHOOK_RECONCILE_BATCH_SIZE',
+  'WEBHOOK_RECONCILE_MAX_ATTEMPTS',
+  'WEBHOOK_OUTBOX_RETENTION_DAYS',
+  'PLUGIN_STATE_DIR',
+  'INGRESS_WORKER_CONCURRENCY',
+  'WS_RATE_LIMIT_FRAME_PER_SECOND',
+  'WS_RATE_LIMIT_FRAME_BURST',
+  'WS_RATE_LIMIT_HANDSHAKE_MAX',
+  'WS_RATE_LIMIT_HANDSHAKE_WINDOW_MS',
+  'WS_MAX_SOCKETS_PER_KEY',
+  'DATABASE_POOL_SIZE',
+  'DATABASE_STATEMENT_TIMEOUT_MS',
+  'DATABASE_IDLE_TIMEOUT_MS',
+  'DATABASE_CONNECTION_TIMEOUT_MS',
+  'MAIN_DATABASE_NAME',
+  'REDIS_USERNAME',
+  'REDIS_PASSWORD',
+  'REDIS_CONNECT_TIMEOUT_MS',
+  'REDIS_TLS',
+  'REDIS_CACHE_DB',
+  'QUEUE_PREFIX',
+  'MAX_CONCURRENT_SESSIONS',
+  'BAILEYS_AUTH_DIR',
+  'BAILEYS_BROWSER_NAME',
+  'BAILEYS_LOG_LEVEL',
+  'BAILEYS_MESSAGE_STORE_LIMIT',
+  'BAILEYS_SESSION_STORE_MAX_ENTRIES',
+  'BAILEYS_CHAT_STATE_CACHE_MAX',
+  'BAILEYS_GROUP_METADATA_CACHE_TTL_MS',
+  'WWEBJS_ONBOARDING_CONTINUE_LABELS',
+  'SHUTDOWN_DELAY_MS',
+  'SIMULATE_TYPING_MAX_MS',
+  'LID_MAPPING_CACHE_MAX',
+  'EXPORT_INLINE_MEDIA_BUDGET_BYTES',
+  'CHAT_HISTORY_MEDIA_BUDGET_BYTES',
+  'STATUS_MEDIA_MAX_BYTES',
+  'STATUS_ORPHAN_SWEEP_INTERVAL_MS',
+  'STATUS_ORPHAN_GRACE_MS',
+  'STORAGE_IMPORT_MAX_BYTES',
+  'STORAGE_IMPORT_MAX_ENTRIES',
+  'STORAGE_IMPORT_MAX_TOTAL_BYTES',
+  'STORAGE_EXPORT_TTL_MS',
+  'STORAGE_EXPORT_SWEEP_MAX_AGE_MS',
+  'S3_REPROBE_INTERVAL_MS',
+  'MESSAGE_REAPER_INTERVAL_MS',
+  'MESSAGE_REAPER_GRACE_MS',
+  'MESSAGE_REAPER_BATCH_SIZE',
+  'PLUGIN_DOWNLOAD_MAX_BYTES',
+  'PLUGIN_INSTALL_REQUIRE_PIN',
+  'PLUGIN_CATALOG_URL',
+  'PLUGIN_CAP_TIMEOUT_MS',
+  'PLUGIN_STORAGE_MAX_BYTES',
+  'UPDATE_CHECK_ENABLED',
+  'AUDIT_RETENTION_DAYS',
+  'MESSAGE_RETENTION_DAYS',
+  'BULK_MAX_CONCURRENT_BATCHES',
+  'TEMPLATE_RENDER_MAX_CHARS',
+  'STATS_CACHE_TTL_MS',
+  'SEARCH_PROVIDER',
+  'SEARCH_LIMIT_MAX',
+  'LOG_FORMAT',
+  'BASE_URL',
+  'DASHBOARD_URL',
 ];
 
 export function clearBlankEnv(env: NodeJS.ProcessEnv, keys: string[]): void {
@@ -149,10 +292,10 @@ export function isOsProvidedEnv(key: string): boolean {
  * OR by the project `.env`, both of which load with `override: false` and therefore win over the
  * dashboard-saved file for good.
  *
- * Distinct from `osEnvKeys` on purpose. That snapshot answers "may this value win over the file being
- * WRITTEN?" for the save-config guard, where only a host value counts. This one answers "can the
- * dashboard change this setting at all?", and there a project `.env` pins exactly as hard as an
- * orchestrator variable does.
+ * Distinct from `osEnvKeys` on purpose. That snapshot records what the host supplied; the save-config
+ * guard now reads both snapshots, since the host and the project .env both outrank the file being
+ * WRITTEN. This one answers "can the dashboard change this setting at all?", and there a project
+ * `.env` pins exactly as hard as an orchestrator variable does.
  */
 let pinnedEnvKeys: Set<string> | null = null;
 

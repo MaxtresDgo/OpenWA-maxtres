@@ -9,7 +9,8 @@ import {
   useUpdateInstanceMutation,
   useDeleteInstanceMutation,
 } from '../hooks/queries';
-import { isValidInstanceId, isValidInstanceSecret, parseInstanceConfig } from '../utils/instanceForm';
+import { isValidInstanceId, isValidInstanceSecret, parseEditScope, parseInstanceConfig } from '../utils/instanceForm';
+import { captionLength } from '../utils/bulkMedia';
 import { copyToClipboard } from '../utils/clipboard';
 import { Modal } from './Modal';
 import { useToast } from '../hooks/useToast';
@@ -61,7 +62,10 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
       return;
     }
     if (!isValidInstanceSecret(form.secret)) {
-      setFormError(t('plugins.instances.errors.invalidSecret'));
+      const count = captionLength(form.secret.trim());
+      setFormError(
+        count > 512 ? t('common.fieldTooLong', { max: 512, count }) : t('plugins.instances.errors.invalidSecret'),
+      );
       return;
     }
     try {
@@ -111,9 +115,8 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
     try {
       await updateM.mutateAsync({
         instanceId: editing.instanceId,
-        // Blank → omit (leave scope unchanged); mirrors create. Sending '' would corrupt an
-        // all-sessions (null) instance into a literal empty scope the backend never clears.
-        body: { sessionScope: editForm.sessionScope.trim() || undefined, config: parsed.value ?? {} },
+        // Blank means all sessions (null, or omitted when already unscoped). Never '': the API rejects it.
+        body: { sessionScope: parseEditScope(editing.sessionScope, editForm.sessionScope), config: parsed.value ?? {} },
       });
       setEditing(null);
       toast.success(t('plugins.instances.toasts.updated'), editing.instanceId);
@@ -235,38 +238,43 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
             </>
           }
         >
-          <label>{t('plugins.instances.form.instanceId')}</label>
+          <label htmlFor="pi-1">{t('plugins.instances.form.instanceId')}</label>
           <input
+            id="pi-1"
             type="text"
             value={form.instanceId}
             placeholder={t('plugins.instances.form.instanceIdPlaceholder')}
             onChange={e => setForm({ ...form, instanceId: e.target.value })}
           />
           <p className="pi-hint">{t('plugins.instances.form.instanceIdHint')}</p>
-          <label>{t('plugins.instances.form.sessionScope')}</label>
+          <label htmlFor="pi-2">{t('plugins.instances.form.sessionScope')}</label>
           <input
+            id="pi-2"
             type="text"
             value={form.sessionScope}
             placeholder={t('plugins.instances.form.sessionScopePlaceholder')}
             onChange={e => setForm({ ...form, sessionScope: e.target.value })}
           />
-          <label>{t('plugins.instances.form.verifyToken')}</label>
+          <label htmlFor="pi-3">{t('plugins.instances.form.verifyToken')}</label>
           <input
+            id="pi-3"
             type="text"
             value={form.verifyToken}
             placeholder={t('plugins.instances.form.verifyTokenPlaceholder')}
             onChange={e => setForm({ ...form, verifyToken: e.target.value })}
           />
-          <label>{t('plugins.instances.form.secret')}</label>
+          <label htmlFor="pi-4">{t('plugins.instances.form.secret')}</label>
           <input
+            id="pi-4"
             type="text"
             value={form.secret}
             placeholder={t('plugins.instances.form.secretPlaceholder')}
             onChange={e => setForm({ ...form, secret: e.target.value })}
           />
           <p className="pi-hint">{t('plugins.instances.form.secretHint')}</p>
-          <label>{t('plugins.instances.form.config')}</label>
+          <label htmlFor="pi-5">{t('plugins.instances.form.config')}</label>
           <textarea
+            id="pi-5"
             value={form.config}
             placeholder={t('plugins.instances.form.configPlaceholder')}
             onChange={e => setForm({ ...form, config: e.target.value })}
@@ -296,15 +304,42 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
           <label>{t('plugins.instances.created.secret')}</label>
           <div className="pi-secret">
             <code>{minted.secret}</code>
-            <button className="btn-primary" onClick={() => void copy(minted.secret, 'secret')}>
+            <button
+              className="btn-primary"
+              onClick={() => void copy(minted.secret, 'secret')}
+              aria-label={t('plugins.instances.actions.copy')}
+              title={t('plugins.instances.actions.copy')}
+            >
               {copied === 'secret' ? <Check size={16} /> : <Copy size={16} />}
             </button>
           </div>
+          {/* Revealed only here; later reads mask it, so an auto-generated token is lost if not shown. */}
+          {minted.verifyToken && (
+            <>
+              <label>{t('plugins.instances.created.verifyToken')}</label>
+              <div className="pi-secret">
+                <code>{minted.verifyToken}</code>
+                <button
+                  className="btn-primary"
+                  onClick={() => void copy(minted.verifyToken!, 'verifyToken')}
+                  aria-label={t('plugins.instances.actions.copy')}
+                  title={t('plugins.instances.actions.copy')}
+                >
+                  {copied === 'verifyToken' ? <Check size={16} /> : <Copy size={16} />}
+                </button>
+              </div>
+            </>
+          )}
           <label>{t('plugins.instances.created.ingressUrls')}</label>
           {minted.ingressUrls.map(u => (
             <div key={u.route} className="pi-secret">
               <code>{u.url}</code>
-              <button className="btn-primary" onClick={() => void copy(u.url, `mint-${u.route}`)}>
+              <button
+                className="btn-primary"
+                onClick={() => void copy(u.url, `mint-${u.route}`)}
+                aria-label={t('plugins.instances.actions.copy')}
+                title={t('plugins.instances.actions.copy')}
+              >
                 {copied === `mint-${u.route}` ? <Check size={16} /> : <Copy size={16} />}
               </button>
             </div>
@@ -334,15 +369,17 @@ export function PluginInstances({ pluginId }: { pluginId: string }) {
             </>
           }
         >
-          <label>{t('plugins.instances.form.sessionScope')}</label>
+          <label htmlFor="pi-6">{t('plugins.instances.form.sessionScope')}</label>
           <input
+            id="pi-6"
             type="text"
             value={editForm.sessionScope}
             placeholder={t('plugins.instances.form.sessionScopePlaceholder')}
             onChange={e => setEditForm({ ...editForm, sessionScope: e.target.value })}
           />
-          <label>{t('plugins.instances.form.config')}</label>
+          <label htmlFor="pi-7">{t('plugins.instances.form.config')}</label>
           <textarea
+            id="pi-7"
             value={editForm.config}
             placeholder={t('plugins.instances.form.configPlaceholder')}
             onChange={e => setEditForm({ ...editForm, config: e.target.value })}

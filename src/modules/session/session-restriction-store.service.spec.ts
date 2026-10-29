@@ -62,6 +62,21 @@ describe('SessionRestrictionStore', () => {
       expect(store.set('s1', timelock({ expiresAt: refreshed }))).toBe(false);
       expect(store.get('s1')?.expiresAt).toBe(refreshed);
     });
+
+    // The lapsed one already reads as no restriction, so the new one flips the session to restricted.
+    it('is news when the same restriction is imposed again after the last one lapsed', () => {
+      store.set('s1', timelock({ expiresAt: Date.now() - 1000 }));
+
+      expect(store.set('s1', timelock({ expiresAt: Date.now() + 60_000 }))).toBe(true);
+    });
+
+    // A clock ahead of WhatsApp's sees the re-read timelock as already over on every connect.
+    it('is not news when the engine re-reports a restriction that has already lapsed', () => {
+      const lapsed = Date.now() - 1000;
+      expect(store.set('s1', timelock({ expiresAt: lapsed }))).toBe(true);
+
+      expect(store.set('s1', timelock({ expiresAt: lapsed }))).toBe(false);
+    });
   });
 
   describe('expiry', () => {
@@ -177,5 +192,33 @@ describe('SessionRestrictionStore', () => {
         expect(store.attachTo(sessionRow('s1', status)).restriction).toEqual(timelock());
       },
     );
+  });
+});
+
+describe('the restricted-sessions gauge follows expiry, not just mutations', () => {
+  const timelock = (expiresAt: number): AccountRestriction =>
+    ({ kind: 'timelock', code: 'reachout', expiresAt }) as unknown as AccountRestriction;
+
+  it('drops to zero once the only restriction lapses, with no further mutation', () => {
+    const store = new SessionRestrictionStore();
+    store.set('s1', timelock(Date.now() + 60_000));
+    expect(getRestrictedSessionCount()).toBe(1);
+
+    // The clock passes the stated end. Nothing calls set() or clear().
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+    try {
+      expect(store.get('s1')).toBeUndefined(); // the read path already agrees it has lapsed
+      expect(getRestrictedSessionCount()).toBe(0);
+    } finally {
+      jest.spyOn(Date, 'now').mockRestore();
+    }
+  });
+
+  // Negative twin: a restriction still in force must keep being counted, or the fix would just
+  // zero the gauge.
+  it('keeps counting a restriction that is still in force', () => {
+    const store = new SessionRestrictionStore();
+    store.set('s2', timelock(Date.now() + 60_000));
+    expect(getRestrictedSessionCount()).toBe(1);
   });
 });

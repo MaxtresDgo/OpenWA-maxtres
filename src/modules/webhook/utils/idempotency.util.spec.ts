@@ -7,6 +7,21 @@ describe('Idempotency Utils', () => {
       expect(key).toBe('msg_A_ABC123');
     });
 
+    it('keys message.receipt by recipient and status, so two members reading the same message stay distinct', () => {
+      const read = (participant: string): string =>
+        generateIdempotencyKey('message.receipt', { id: 'ABC123', participant, status: 'read', sessionId: 'A' });
+      expect(read('628111@c.us')).toBe('receipt_A_ABC123_628111@c.us_read');
+      expect(read('628222@c.us')).not.toBe(read('628111@c.us'));
+      expect(
+        generateIdempotencyKey('message.receipt', {
+          id: 'ABC123',
+          participant: '628111@c.us',
+          status: 'delivered',
+          sessionId: 'A',
+        }),
+      ).not.toBe(read('628111@c.us'));
+    });
+
     it('falls back to the legacy `ack` integer for message.ack when no `status` is present', () => {
       const key = generateIdempotencyKey('message.ack', { messageId: 'ABC123', ack: 3, sessionId: 'A' });
       expect(key).toBe('ack_A_ABC123_3');
@@ -131,6 +146,16 @@ describe('Idempotency Utils', () => {
       expect(a).toBe(b);
     });
 
+    // Once the backoff reaches its cap, a later outage that loops to the same attempt count dispatches
+    // a byte-identical payload; the second alert is news and must not dedupe onto the first.
+    it('salts session.reconnect_loop keys per occurrence and keeps them retry-stable', () => {
+      const payload = { sessionId: 'A', attempts: 10, nextDelayMs: 300_000 };
+      const first = generateIdempotencyKey('session.reconnect_loop', payload, '2026-09-01T00:00:00.000Z');
+      const later = generateIdempotencyKey('session.reconnect_loop', payload, '2026-09-01T06:00:00.000Z');
+      expect(first).not.toBe(later);
+      expect(generateIdempotencyKey('session.reconnect_loop', { ...payload }, '2026-09-01T00:00:00.000Z')).toBe(first);
+    });
+
     it('does not salt message-event keys with the occurrence time (content-based dedup preserved)', () => {
       const a = generateIdempotencyKey(
         'message.ack',
@@ -209,6 +234,19 @@ describe('Idempotency Utils', () => {
       expect(key).toMatch(/^grp_123@g\.us_[a-f0-9]{12}_join_2026-07-20T00:00:00\.000Z$/);
     });
 
+    it('keys group.join_request like group.join — a reject-then-re-request must stay a distinct event', () => {
+      const at = '2026-07-20T00:00:00.000Z';
+      const data = { groupId: '123@g.us', participantIds: ['6281@c.us'], timestamp: 1782000000 };
+
+      const key = generateIdempotencyKey('group.join_request', data, at);
+
+      expect(key).toMatch(/^grp_123@g\.us_[a-f0-9]{12}_join_request_2026-07-20T00:00:00\.000Z$/);
+      // Occurrence salt: the same user asking again later is a new event, not a duplicate.
+      expect(generateIdempotencyKey('group.join_request', data, '2026-07-20T01:00:00.000Z')).not.toBe(key);
+      // Retry-stable: the same dispatch regenerates the same key.
+      expect(generateIdempotencyKey('group.join_request', data, at)).toBe(key);
+    });
+
     it('is retry-stable for group.join: the same occurrence regenerates the same key', () => {
       const at = '2026-07-20T00:00:00.000Z';
       const data = { groupId: '123@g.us', participantIds: ['6281@c.us'], timestamp: 1782000000 };
@@ -250,6 +288,68 @@ describe('Idempotency Utils', () => {
       // ...and a different change differs even inside the same dispatch window.
       expect(generateIdempotencyKey('group.update', { groupId: '123@g.us', changes: { announce: true } }, at)).not.toBe(
         a,
+      );
+    });
+
+    it('keys presence.update on WHAT changed, salted per occurrence', () => {
+      const at = '2026-07-20T00:00:00.000Z';
+      const data = { sessionId: 'A', chatId: '123@g.us', participants: [{ id: 'u1@lid', state: 'composing' }] };
+      const a = generateIdempotencyKey('presence.update', data, at);
+      expect(a).toMatch(/^pres_A_123@g\.us_[a-f0-9]{12}_2026-07-20T00:00:00\.000Z$/);
+      expect(generateIdempotencyKey('presence.update', data, at)).toBe(a);
+      expect(generateIdempotencyKey('presence.update', data, '2026-07-20T00:05:00.000Z')).not.toBe(a);
+      // Two participants changing in the same millisecond are two events, not one.
+      const other = { ...data, participants: [{ id: 'u2@lid', state: 'available' }] };
+      expect(generateIdempotencyKey('presence.update', other, at)).not.toBe(a);
+    });
+
+    it('keys event.response on the session + RSVP id (unique per answer, no occurrence salt needed)', () => {
+      const at = '2026-07-20T00:00:00.000Z';
+      const data = { sessionId: 'A', eventMessageId: 'EVT1', responseMessageId: 'RSVP1', response: 'going' };
+      const key = generateIdempotencyKey('event.response', data, at);
+      expect(key).toBe('rsvp_A_RSVP1');
+      expect(generateIdempotencyKey('event.response', data, '2026-07-20T01:00:00.000Z')).toBe(key);
+      // A changed answer is a new RSVP with a new id, so it is never deduped against the first.
+      const changed = { ...data, responseMessageId: 'RSVP2', response: 'not_going' };
+      expect(generateIdempotencyKey('event.response', changed, at)).not.toBe(key);
+      expect(generateIdempotencyKey('event.response', { ...data, sessionId: 'B' }, at)).not.toBe(key);
+    });
+
+    it('keys poll.vote on the session + poll + voter + vote time (distinct per change, stable across retries)', () => {
+      const at = '2026-07-20T00:00:00.000Z';
+      const data = { sessionId: 'A', pollMessageId: 'POLL1', voterId: 'V1', selectedOptions: ['Yes'], timestamp: 100 };
+      const key = generateIdempotencyKey('poll.vote', data, at);
+      // Without the millisecond stamp the whole second stands in for it.
+      expect(key).toMatch(/^vote_A_POLL1_V1_100_[0-9a-f]{12}$/);
+      expect(generateIdempotencyKey('poll.vote', data, '2026-07-20T01:00:00.000Z')).toBe(key);
+      // An identical redelivery dedupes, a different selection in the same second does not.
+      expect(generateIdempotencyKey('poll.vote', { ...data }, at)).toBe(key);
+      expect(generateIdempotencyKey('poll.vote', { ...data, selectedOptions: ['Yes', 'No'] }, at)).not.toBe(key);
+      expect(generateIdempotencyKey('poll.vote', { ...data, selectedOptions: [] }, at)).not.toBe(key);
+      // Going back to an earlier selection later is a new change, never deduped against the first.
+      expect(generateIdempotencyKey('poll.vote', { ...data, timestamp: 200 }, at)).not.toBe(key);
+      // Two voters on the same poll in the same second are two events.
+      expect(generateIdempotencyKey('poll.vote', { ...data, voterId: 'V2' }, at)).not.toBe(key);
+    });
+
+    // A voter flipping A, B, A within one second: the third change shares the whole second, the selection and so
+    // the hash with the first. Under the key of the first it would be dropped by a receiver that dedupes on it,
+    // which would then end on B while the voter's choice is A.
+    it('keeps a vote that returns to an earlier selection within the same second apart from the first', () => {
+      const at = '2026-07-20T00:00:00.000Z';
+      const first = {
+        sessionId: 'A',
+        pollMessageId: 'POLL1',
+        voterId: 'V1',
+        selectedOptions: ['A'],
+        timestamp: 100,
+        timestampMs: 100100,
+      };
+      const third = { ...first, timestampMs: 100900 };
+      expect(generateIdempotencyKey('poll.vote', third, at)).not.toBe(generateIdempotencyKey('poll.vote', first, at));
+      // A redelivery of the same change still carries the same stamp and the same key.
+      expect(generateIdempotencyKey('poll.vote', { ...first }, '2026-07-20T01:00:00.000Z')).toBe(
+        generateIdempotencyKey('poll.vote', first, at),
       );
     });
 

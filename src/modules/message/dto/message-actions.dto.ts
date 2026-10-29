@@ -11,9 +11,23 @@ import {
   ArrayMaxSize,
   MaxLength,
   IsIn,
+  Validate,
+  Matches,
 } from 'class-validator';
-import { ToStrictBoolean, ToStrictNumber } from '../../../common/utils/strict-boolean';
-import { MESSAGE_TEXT_MAX_LENGTH } from './send-message.dto';
+import { ToStrictArray, ToStrictBoolean, ToStrictNumber, ToStrictString } from '../../../common/utils/strict-boolean';
+import {
+  CHAT_ID_MAX_LENGTH,
+  CHAT_JID_MESSAGE,
+  CHAT_JID_PATTERN,
+  MENTIONS_DESCRIPTION,
+  MENTIONS_MAX,
+  MENTION_WID_MAX_LENGTH,
+  BUTTON_ID_MAX_LENGTH,
+  MESSAGE_TEXT_MAX_LENGTH,
+  QUOTED_MESSAGE_ID_DESCRIPTION,
+  QUOTED_MESSAGE_ID_EXAMPLE,
+} from './send-message.dto';
+import { IsMentionWidConstraint } from './is-mention-wid.validator';
 
 /**
  * Validated DTOs for the message action endpoints. These replaced inline
@@ -29,9 +43,12 @@ export const CONTACT_NUMBER_MAX_LENGTH = 30;
 export const REACTION_EMOJI_MAX_LENGTH = 32;
 
 export class SendLocationDto {
-  @ApiProperty({ description: 'Chat ID (e.g. 628123456789@c.us)' })
+  @ApiProperty({ description: 'Chat ID (e.g. 628123456789@c.us)', maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty({ example: -6.2088 })
@@ -46,43 +63,68 @@ export class SendLocationDto {
 
   @ApiPropertyOptional({ maxLength: LOCATION_TEXT_MAX_LENGTH })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   @MaxLength(LOCATION_TEXT_MAX_LENGTH)
   description?: string;
 
   @ApiPropertyOptional({ maxLength: LOCATION_TEXT_MAX_LENGTH })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   @MaxLength(LOCATION_TEXT_MAX_LENGTH)
   address?: string;
+
+  @ApiPropertyOptional({ description: QUOTED_MESSAGE_ID_DESCRIPTION, example: QUOTED_MESSAGE_ID_EXAMPLE })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  quotedMessageId?: string;
 }
 
 export class SendContactDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty({ maxLength: CONTACT_NAME_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(CONTACT_NAME_MAX_LENGTH)
   contactName!: string;
 
   @ApiProperty({ maxLength: CONTACT_NUMBER_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(CONTACT_NUMBER_MAX_LENGTH)
   contactNumber!: string;
+
+  @ApiPropertyOptional({ description: QUOTED_MESSAGE_ID_DESCRIPTION, example: QUOTED_MESSAGE_ID_EXAMPLE })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  quotedMessageId?: string;
 }
 
 export class SendPollDto {
-  @ApiProperty({ description: 'Chat ID (e.g. 628123456789@c.us or 1203630000@g.us)' })
+  @ApiProperty({ description: 'Chat ID (e.g. 628123456789@c.us or 1203630000@g.us)', maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty({ description: 'Poll question / title', maxLength: 255, example: 'Where should we meet?' })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(255)
@@ -93,8 +135,12 @@ export class SendPollDto {
   @ApiProperty({
     description: 'Options to vote on (WhatsApp allows between 2 and 12)',
     type: [String],
+    minItems: 2,
+    maxItems: 12,
+    items: { type: 'string', maxLength: 100 },
     example: ['Park', 'Beach', 'Downtown'],
   })
+  @ToStrictArray()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(12)
@@ -111,51 +157,90 @@ export class SendPollDto {
   @IsOptional()
   @IsBoolean()
   allowMultipleAnswers?: boolean;
+
+  @ApiPropertyOptional({ description: QUOTED_MESSAGE_ID_DESCRIPTION, example: QUOTED_MESSAGE_ID_EXAMPLE })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  quotedMessageId?: string;
 }
 
 export class ReplyMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   quotedMessageId!: string;
 
   // Same body cap as SendTextMessageDto.text — a reply cannot exceed what a send allows.
   @ApiProperty({ maxLength: MESSAGE_TEXT_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   text!: string;
+
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
+  @IsOptional()
+  @ToStrictArray()
+  @IsArray()
+  @ArrayMaxSize(MENTIONS_MAX)
+  @IsString({ each: true })
+  @MaxLength(MENTION_WID_MAX_LENGTH, { each: true })
+  @Validate(IsMentionWidConstraint, { each: true })
+  mentions?: string[];
 }
 
 export class ForwardMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   fromChatId!: string;
 
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   toChatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
 }
 
 export class ReactMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
@@ -165,18 +250,23 @@ export class ReactMessageDto {
     description: 'Emoji to react with. Send an empty string to remove the reaction.',
     maxLength: REACTION_EMOJI_MAX_LENGTH,
   })
+  @ToStrictString()
   @IsString()
   @MaxLength(REACTION_EMOJI_MAX_LENGTH)
   emoji!: string;
 }
 
 export class DeleteMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
@@ -200,12 +290,16 @@ export class DeleteMessageDto {
 export const PIN_DURATIONS_SECONDS = [86400, 604800, 2592000] as const;
 
 export class PinMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
@@ -228,12 +322,16 @@ export class PinMessageDto {
 export const POLL_VOTE_MAX_OPTIONS = 12;
 
 export class VotePollDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty({ description: 'The poll creation message to vote on.' })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   pollMessageId!: string;
@@ -245,19 +343,64 @@ export class VotePollDto {
     type: [String],
     maxItems: POLL_VOTE_MAX_OPTIONS,
   })
+  @ToStrictArray()
   @IsArray()
   @ArrayMaxSize(POLL_VOTE_MAX_OPTIONS)
   @IsString({ each: true })
   options!: string[];
 }
 
-export class StarMessageDto {
-  @ApiProperty()
+export class ClickButtonDto {
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
+  chatId!: string;
+
+  @ApiProperty({ description: 'WhatsApp id of the business prompt message that offered the buttons.' })
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  messageId!: string;
+
+  @ApiProperty({
+    description:
+      'Stable id of the choice to tap (inbound `buttons[].id`). URL/call CTA buttons cannot be clicked this way.',
+    maxLength: BUTTON_ID_MAX_LENGTH,
+  })
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  // Bounded by what a choice id can actually be, not by the text cap: the engine never offers a
+  // choice whose id is longer, so anything past this could only ever answer "unknown button".
+  @MaxLength(BUTTON_ID_MAX_LENGTH)
+  buttonId!: string;
+
+  @ApiPropertyOptional({
+    description: 'Visible label of the choice. When omitted, resolved from the stored prompt; falls back to buttonId.',
+    maxLength: MESSAGE_TEXT_MAX_LENGTH,
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
+  text?: string;
+}
+
+export class StarMessageDto {
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
@@ -271,32 +414,60 @@ export class StarMessageDto {
 }
 
 export class UnpinMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
 }
 
 export class EditMessageDto {
-  @ApiProperty()
+  @ApiProperty({ maxLength: CHAT_ID_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty()
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   messageId!: string;
 
-  // Same body cap as SendTextMessageDto.text — an edit cannot exceed what a send allows.
-  @ApiProperty({ description: 'New text body for the message', maxLength: 4096 })
+  // Same body cap as SendTextMessageDto.text — an edit cannot exceed what a send allows. Bound to the
+  // shared constant rather than restated, so the two cannot drift apart.
+  @ApiProperty({ description: 'New text body for the message', maxLength: MESSAGE_TEXT_MAX_LENGTH })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
-  @MaxLength(4096)
+  @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   body!: string;
+
+  // An edit REPLACES the message content, so tags are re-applied rather than preserved: omitting
+  // this drops whatever the original body carried.
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
+  @IsOptional()
+  @ToStrictArray()
+  @IsArray()
+  @ArrayMaxSize(MENTIONS_MAX)
+  @IsString({ each: true })
+  @MaxLength(MENTION_WID_MAX_LENGTH, { each: true })
+  @Validate(IsMentionWidConstraint, { each: true })
+  mentions?: string[];
 }

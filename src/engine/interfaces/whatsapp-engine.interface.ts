@@ -29,9 +29,31 @@ export enum EngineStatus {
 export interface MessageResult {
   id: string;
   timestamp: number;
+  /**
+   * Display text actually sent, when it differs from the caller's input. Button clicks resolve
+   * the visible label from the stored prompt when the caller omitted `text`, so the persisted
+   * row can store that label instead of the raw `buttonId`.
+   */
+  body?: string;
 }
 
-export interface MediaInput {
+/**
+ * A send payload that can quote an earlier message, turning the send into a reply.
+ *
+ * Deliberately a PROPERTY on the payload rather than a parameter on the engine methods: the parity
+ * gate reads call-shaped members out of this file, so a new method would demand a capability-matrix
+ * row while a property demands nothing (see engine-parity.spec.ts MEMBER_RE).
+ *
+ * The id is engine-specific and the adapters do NOT harmonize it: whatsapp-web.js matches the
+ * serialized message id, Baileys looks the raw key id up in its local store and can only quote a
+ * message it has already persisted.
+ */
+export interface Quotable {
+  /** Quote this message id in the send. Omit for a plain, unquoted send. */
+  quotedMessageId?: string;
+}
+
+export interface MediaInput extends Quotable {
   mimetype: string;
   data: Buffer | string; // Buffer or base64 or URL
   /** Caller-supplied filename wins. Document sends fall back to 'file' when omitted (wwebjs first derives the URL basename); image/video/audio sends carry no filename. */
@@ -62,6 +84,10 @@ export type MessageType =
   | 'poll'
   | 'call'
   | 'revoked'
+  // WhatsApp Business commerce: a customer's cart placed from the catalog, and a single product
+  // card shared into a chat. Both carry the ids the commerce APIs need — see `IncomingMessage`.
+  | 'order'
+  | 'product'
   // A message WhatsApp deliberately withheld from linked/companion devices (e.g. high-security
   // business OTPs): the payload is absent by design, not unparseable. See `mapBaileysMessageType`.
   | 'masked'
@@ -77,6 +103,14 @@ export interface IncomingMessage {
   timestamp: number;
   fromMe: boolean;
   isGroup: boolean;
+  /**
+   * Set by an engine that applied an edit to `body` before it handed the message over: the text the message
+   * arrived with. The edits that reached the message meanwhile reach the session too, and are compared with
+   * this text. It equals `body` when a later edit restored that text, as the message was edited all the same,
+   * and is unset when every edit repeated the text. The session removes the field before the message is
+   * hooked, stored or announced.
+   */
+  originalBody?: string;
   /** User-facing chat kind of the conversation this message belongs to (derived from `chatId`). */
   kind: ChatKind;
   /**
@@ -88,12 +122,61 @@ export interface IncomingMessage {
    *  in the raw payload. 0 or undefined = no disappearing timer.
    *  Known values: 86400 (24h), 604800 (7d), 7776000 (90d). */
   ephemeralDuration?: number;
-  /** For group messages, the WID of the participant who actually sent it (`from` is the group JID there). */
+  /**
+   * For group, status and broadcast-list messages, the WID of the sender, where `from` is the group or
+   * `status@broadcast`. A broadcast-list message the account received is filed under the sender's own
+   * chat on Baileys, as WhatsApp lists it, so there `chatId` and `from` name the sender and `author`
+   * repeats it.
+   */
   author?: string;
   /** WIDs @mentioned in the message (empty/absent when none). Surfaced for command targeting. */
   mentionedIds?: string[];
   /** Set for `call` (call_log) messages: video vs voice, and whether an incoming call went unanswered. */
   call?: { video: boolean; missed: boolean };
+  /**
+   * Set for `order` messages: a cart the customer placed from the business catalog. The message
+   * carries no line items — `orderId` plus the single-order `token` are the correlation handle a
+   * caller redeems against WhatsApp's own order lookup, which this project does not expose, so both
+   * must survive to that caller. Both engines populate them.
+   */
+  order?: {
+    orderId: string;
+    /** Opaque, single-order credential. Pass through unchanged; do not log it. */
+    token?: string;
+  };
+  /**
+   * Set for `product` messages: the catalog product shared into the chat. `productId` identifies it
+   * within `businessOwnerJid`'s catalog, so it resolves through the catalog routes only when that
+   * catalog is the session's own. Both engines populate `productId`; the rest are best-effort.
+   */
+  product?: {
+    productId: string;
+    title?: string;
+    description?: string;
+    businessOwnerJid?: string;
+  };
+  /**
+   * Set when the sender tapped a WhatsApp Business button, template quick-reply, list row, or
+   * native-flow control. `id` is the stable handle the business defined on the button/row; `text`
+   * is the visible label when WhatsApp still carries it (also mirrored into `body`). **Baileys
+   * only**: whatsapp-web.js does not surface interactive replies as structured fields.
+   */
+  button?: {
+    id: string;
+    text?: string;
+  };
+  /**
+   * Set on an inbound WhatsApp Business prompt that offers buttons (or list rows flattened as
+   * buttons): the choices shown to the recipient. URL/call CTAs are omitted, since they are not
+   * clickable via {@link IWhatsAppEngine.clickButton} and must not masquerade as button ids.
+   * Distinct from {@link IncomingMessage.button}, which is set only when someone *taps* a choice.
+   * **Baileys only.** Capped (count and label length) so a malformed prompt cannot bloat
+   * persisted rows / webhook payloads.
+   */
+  buttons?: Array<{
+    id: string;
+    text: string;
+  }>;
   /**
    * Set by the adapter when the sender is identified by a privacy id (e.g. a WhatsApp `@lid`) rather
    * than a phone number, so engine-neutral code can decide whether to attempt phone resolution without
@@ -112,11 +195,12 @@ export interface IncomingMessage {
   backgroundColor?: string;
   /** Styling of a text status/story: the WhatsApp font index. Only set by engines that expose it. */
   font?: number;
+  poll?: PollDetails;
   media?: {
     mimetype: string;
     filename?: string;
     data?: string; // base64; absent when the payload was omitted (see `omitted`)
-    /** True when the media blob was dropped due to a size cap, timeout, or concurrency saturation. */
+    /** True when the media blob was dropped: a size cap, a timeout, a disabled download, or a failed one. */
     omitted?: boolean;
     /** Decoded byte size of the media; always set when `omitted` is true. */
     sizeBytes?: number;
@@ -196,10 +280,17 @@ export interface GroupParticipant {
  * Outcome of a group membership write (add/remove/promote/demote) for ONE participant. Engines
  * that report per-participant results map them verbatim (whatsapp-web.js `addParticipants` resolves
  * a `{[participantId]: {code, message}}` object; Baileys `groupParticipantsUpdate` resolves a
- * `[{status, jid}]` array); engines that only confirm the batch as a whole (whatsapp-web.js
- * remove/promote/demote resolve `{status: 200}`) report one success entry per requested participant.
+ * `[{status, jid}]` array).
+ *
+ * whatsapp-web.js remove/promote/demote confirm only the batch, but an install-time patch
+ * (`scripts/patch-wwebjs-participant-arity.js`) makes the page report which requested ids resolved
+ * to actual members, so those entries are per-participant too: an id the page dropped is reported
+ * `404` rather than confirmed. On a tree where that patch was not applied the marker is absent and
+ * the adapter falls back to one batch-confirmed entry per requested participant, which is all the
+ * library reports there.
+ *
  * `status` is the engine's own code when it reported one (e.g. 200 ok, 403 invite-only/not-admin,
- * 404 not registered, 409 already a member).
+ * 404 not registered or not a member, 409 already a member).
  */
 export interface ParticipantOperationResult {
   /** Neutral participant id the outcome belongs to. */
@@ -259,11 +350,32 @@ export interface GroupJoinInfo {
   participantCount?: number;
 }
 
+/** How a join request was made. Neutral vocabulary; both engines' tokens map onto it. */
+export type GroupMembershipRequestMethod = 'invite_link' | 'non_admin_add' | 'linked_group_join';
+
+/**
+ * One pending request to join a group that has join-approval turned on. Mapped at the adapter
+ * boundary from engine shapes that disagree on everything: whatsapp-web.js resolves raw
+ * page-context store objects (wid objects, PascalCase method tokens), Baileys bare wire attrs
+ * (engine-dialect jids, snake_case tokens, stringly timestamps). Fields the engine did not report
+ * are omitted rather than defaulted.
+ */
+export interface GroupMembershipRequest {
+  /** Neutral id of the user asking to join. */
+  participantId: string;
+  /** Who created the request when the engine reports it (differs from the requester on a non-admin add). */
+  addedById?: string;
+  /** How the request was made, when the engine reports a token this shape models. */
+  method?: GroupMembershipRequestMethod;
+  /** Unix seconds the request was created, when the engine reports it. */
+  requestedAt?: number;
+}
+
 /**
  * A caller-supplied link preview, used instead of fetching one.
  *
- * Nothing is fetched for these: the caller states the metadata, so the gateway makes no outbound
- * request at all — which also means a preview can be attached for a URL this server could not reach.
+ * The page at `url` is never fetched: the caller states the metadata, so a preview can be attached for
+ * a URL this server could not reach. The only outbound request is for `thumbnailUrl`, when given.
  */
 export interface CustomLinkPreview {
   /** The URL as it appears in the message text; WhatsApp anchors the preview to it. */
@@ -271,21 +383,35 @@ export interface CustomLinkPreview {
   /** Required — WhatsApp will not render a preview without one. */
   title: string;
   description?: string;
+  /**
+   * Preview image as an http(s) URL, fetched through the SSRF-guarded media loader. Baileys uploads it
+   * as the high-quality link thumbnail, which renders the large preview card.
+   */
+  thumbnailUrl?: string;
+  /** Preview image as base64. Wins over `thumbnailUrl` when both are present, as on the media routes. */
+  thumbnailBase64?: string;
 }
 
-export interface ContactCard {
+export interface ContactCard extends Quotable {
   name: string;
   number: string;
 }
 
-export interface LocationInput {
+export interface LocationInput extends Quotable {
   latitude: number;
   longitude: number;
   description?: string;
   address?: string;
 }
 
-export interface PollInput {
+/** Poll choices as received from the engine, without vote counts. */
+export interface PollDetails {
+  name: string;
+  options: string[];
+  allowMultipleAnswers: boolean;
+}
+
+export interface PollInput extends Quotable {
   /** Poll question / title. */
   name: string;
   /** Options to vote on (WhatsApp accepts between 2 and 12). */
@@ -409,9 +535,12 @@ export interface Product {
   id: string;
   name: string;
   description?: string;
-  price: number;
-  currency: string;
-  priceFormatted: string;
+  /** Absent when the catalog item carries no price. */
+  price?: number;
+  /** Absent when the catalog item carries no currency. */
+  currency?: string;
+  /** Present only when price is. */
+  priceFormatted?: string;
   imageUrl?: string;
   url: string;
   isAvailable: boolean;
@@ -447,6 +576,27 @@ export interface ChatSummary {
   unreadCount: number;
   timestamp: number;
   lastMessage?: string;
+  /** Engine-neutral type of the last message, when available. */
+  lastMessageType?: MessageType;
+  /** Archived state, as set via `POST /sessions/{sessionId}/chats/archive`. */
+  archived: boolean;
+  /** Pinned state, as set via `POST /sessions/{sessionId}/chats/pin`. */
+  pinned: boolean;
+  /**
+   * Muted state, as set via `POST /sessions/{sessionId}/chats/mute`. The verdict a caller needs to
+   * label a mute/unmute control: whatsapp-web.js derives `Chat.isMuted` itself, and Baileys compares
+   * a persisted `muteEndTime` (epoch milliseconds) against now. `muteExpiration` carries the instant.
+   */
+  muted: boolean;
+  /**
+   * Epoch MILLISECONDS at which the mute ends, present only when `muted` is true; `0` means muted
+   * indefinitely. Milliseconds is the same unit as `POST /sessions/{sessionId}/chats/mute`
+   * `muteUntil`, so a FINITE value can be written straight back (`mute-chat.dto.ts` documents that
+   * unit and why a seconds value is a trap). The `0` an indefinite mute reports is the exception:
+   * `muteUntil` requires a real future instant, so re-apply an indefinite mute with a far-future
+   * timestamp rather than `0`.
+   */
+  muteExpiration?: number;
 }
 
 /**
@@ -454,6 +604,12 @@ export interface ChatSummary {
  * `paused` clears it. Best-effort: engines without a presence concept may no-op.
  */
 export type ChatState = 'typing' | 'recording' | 'paused';
+
+/**
+ * Which kind of call a generated link opens. `audio` is the neutral spelling; Baileys uses the same
+ * word, whatsapp-web.js calls it `voice`, and WhatsApp's own URL path is `/voice/`.
+ */
+export type CallLinkType = 'audio' | 'video';
 
 /**
  * Engine-neutral message delivery status. Each adapter maps its native delivery signal
@@ -510,6 +666,38 @@ export interface EditedMessage {
   timestamp: number;
 }
 
+/** A guest's answer to a WhatsApp event invitation (the "Going" / "Not going" / "Maybe" buttons). */
+export type EventResponseKind = 'going' | 'not_going' | 'maybe' | 'unknown';
+
+/**
+ * One RSVP to a WhatsApp event (the calendar-style event created from the attach menu). WhatsApp
+ * encrypts each RSVP with a key derived from the event creation message's `messageSecret`, so an
+ * engine can only report the answers to events whose creation message it holds. A guest who changes
+ * their answer produces a new RSVP; the one with the latest `timestamp` per `responderId` is the
+ * current state.
+ */
+export interface EventResponseEvent {
+  /** Id of the event creation message the RSVP answers. */
+  eventMessageId: string;
+  /** Neutral id of the chat the event was posted in. */
+  chatId: string;
+  /** Neutral id of the guest who answered (the account itself when it answered from its phone). */
+  responderId: string;
+  /** The responder's saved name and profile name, when the session knows either. */
+  contact?: { name?: string; pushName?: string };
+  /** True when the account itself answered (from its phone). */
+  fromMe: boolean;
+  response: EventResponseKind;
+  /** Extra guests the responder said they are bringing; absent when WhatsApp sent none. */
+  extraGuestCount?: number;
+  /** The event's name, when the creation message is available to read it from. */
+  eventName?: string;
+  /** Id of the RSVP message itself; unique per answer, so a changed answer has a new one. */
+  responseMessageId: string;
+  /** Unix seconds the guest answered (sender clock). */
+  timestamp: number;
+}
+
 export interface ReactionEvent {
   messageId: string;
   chatId: string;
@@ -518,21 +706,55 @@ export interface ReactionEvent {
 }
 
 /**
+ * A voter's current selection on a poll (the native poll sent with `send-poll` or from the phone).
+ * WhatsApp sends the whole selection each time a voter changes it, so the latest `timestamp` per
+ * `voterId` is the current state, and an empty `selectedOptions` means the voter cleared their vote.
+ */
+export interface PollVoteEvent {
+  /** Id of the poll creation message the vote belongs to. */
+  pollMessageId: string;
+  /** Neutral id of the chat the poll was posted in. */
+  chatId: string;
+  /** Neutral id of the voter (the account itself when it voted from its phone). */
+  voterId: string;
+  /**
+   * The option texts now selected, exactly as they appear on the poll (the same strings `vote-poll`
+   * takes). An option the engine could not name is left out.
+   */
+  selectedOptions: string[];
+  /** The poll's question, when the creation message is available to read it from. */
+  pollName?: string;
+  /** Unix seconds the voter changed the selection (sender clock). */
+  timestamp: number;
+  /**
+   * The same instant in Unix milliseconds. Two changes of one voter within a second share `timestamp`, so
+   * this is what orders them and tells them apart.
+   */
+  timestampMs: number;
+}
+
+/**
  * A group membership or metadata change, mapped at the adapter boundary to this neutral
  * shape so consumers never see engine-specific payloads:
- *  - whatsapp-web.js: `group_join` / `group_leave` / `group_update` (GroupNotification).
+ *  - whatsapp-web.js: `group_join` / `group_leave` / `group_update` /
+ *    `group_membership_request` (GroupNotification).
  *  - Baileys: `group-participants.update` (add/remove only — promote/demote are not
- *    surfaced) and `groups.update` (subject/desc/announce/restrict).
+ *    surfaced), `groups.update` (subject/desc/announce/restrict), `groups.upsert` (this
+ *    session added to or joining a group; participantIds is the session's own id) and `group.join-request`
+ *    (action 'created' only — the wwebjs event has no revoke/reject counterpart, so only
+ *    the shared signal is surfaced; rc14 itself emits the event only for non-admin-add
+ *    requests — the direct self-request stub 144 is unhandled upstream, marked TODO at
+ *    Utils/process-message.js:569 — so an invite-link self-request may not fire on Baileys).
  * All ids are in the neutral dialect (`@g.us` / `@c.us`; a lid stays `<id>@lid` when the
  * lid->phone mapping is unknown).
  */
 export interface GroupEvent {
-  kind: 'join' | 'leave' | 'update';
+  kind: 'join' | 'leave' | 'update' | 'join_request';
   /** Neutral group id (`@g.us`). */
   groupId: string;
   /** Who performed the action, neutral user id when the engine reports one. */
   actorId?: string;
-  /** Affected users (join/leave), neutral ids. Empty for metadata updates. */
+  /** Affected users (join/leave), or the users asking to join (join_request), neutral ids. Empty for metadata updates. */
   participantIds: string[];
   /** Metadata delta for kind 'update'; absent or partially populated for join/leave. */
   changes?: { subject?: string; description?: string; announce?: boolean; locked?: boolean };
@@ -542,15 +764,15 @@ export interface GroupEvent {
 
 /**
  * An incoming (ringing) call, mapped at the adapter boundary to this neutral shape:
- *  - whatsapp-web.js: the client `call` event (a `Call` object the adapter caches so a later
- *    `rejectCall` can act on it — the object is only usable while the call is live).
+ *  - whatsapp-web.js: the client `call` event (the adapter caches the ringing call id so a repeated
+ *    signal for the same call is not announced twice).
  *  - Baileys: the `call` event's `offer` status entries (other statuses are lifecycle updates and
  *    are not surfaced).
  * All ids are in the neutral dialect (`@c.us`; a lid caller stays `<id>@lid` when the lid->phone
  * mapping is unknown, resolved via the inline phone twin when the engine provides one).
  */
 export interface IncomingCallEvent {
-  /** Engine call id; the handle `rejectCall` accepts while the call is still ringing. */
+  /** Engine call id; the id `rejectCall` accepts while the call is still ringing (Baileys). */
   callId: string;
   /** Neutral caller id. */
   from: string;
@@ -649,41 +871,177 @@ export interface CallOutcomeEvent {
   timestamp: number;
 }
 
+/** What one recipient did with an outgoing message. `played` applies to voice notes and view-once media. */
+export type MessageReceiptStatus = 'delivered' | 'read' | 'played';
+
+/**
+ * One recipient's receipt for a message the account sent (group and status messages, where WhatsApp
+ * reports each participant separately). Receipts from the account's own linked devices are dropped
+ * by the adapter, so `participant` is always someone else.
+ */
+export interface MessageReceiptEvent {
+  messageId: string;
+  /** Neutral id of the chat the message was sent to (the group, or `status@broadcast`). */
+  chatId: string;
+  /** Neutral id of the recipient the receipt came from. */
+  participant: string;
+  status: MessageReceiptStatus;
+  /** Unix seconds the recipient reached this status (engine timestamp). */
+  timestamp: number;
+}
+
+/**
+ * A message's place in its session from the moment it arrives until its row is written (see
+ * `EngineEventCallbacks.admitInbound`). The engine hands it back with the message it emits.
+ */
+export interface InboundTicket {
+  /**
+   * Room for one downloaded payload: true once granted, false when the message asked for none, or
+   * when no room came free in time (the media then goes out with the omitted marker, undownloaded).
+   * Call it right before the download, never earlier: the grant is held until the row is written.
+   */
+  reserve: () => boolean | Promise<boolean>;
+  /** Keep the room until `p` settles too: work on the payload that may outlive the emit. */
+  holdUntil: (p: Promise<unknown>) => void;
+  /** The message will not be emitted: release its turn and its room. A no-op after the emit. */
+  drop: () => void;
+  /**
+   * Whether the session recorded a delete for everyone of this message while holding it, so emitting
+   * it stores the row cleared and announces nothing. False for a revoke the session never saw.
+   */
+  readonly revoked: boolean;
+}
+
+/**
+ * What the session made of a message handed to `EngineEventCallbacks.onMessage`, for an engine that
+ * keeps its own copy of messages keyed by id. An engine that keeps none ignores it.
+ */
+export interface InboundOutcome {
+  /**
+   * The session already holds a different message under this id (another chat, another side of the
+   * conversation, or another author), so the delivery was dropped as a duplicate. The engine's copy
+   * under that id is this delivery's, not the message the session holds, and must not stand in for it.
+   * Left out for a delivery that landed and for one the session cannot prove is another message.
+   */
+  conflict?: boolean;
+}
+
+/**
+ * The session's answer to `onMessage`, for an engine that wants to know what became of the message.
+ * Wrapped rather than a bare promise: most engines ignore it, and a promise nobody awaits reads as a
+ * mistake wherever a callback is called.
+ */
+export interface InboundReceipt {
+  /** Settles once the message's row is settled, with what became of it; never rejects. */
+  settled: Promise<InboundOutcome | undefined>;
+}
+
 export interface EngineEventCallbacks {
   onQRCode?: (qr: string) => void;
   onReady?: (phone: string, pushName: string) => void;
-  onMessage?: (message: IncomingMessage) => void;
+  /**
+   * Set only where a downloaded payload outlives the emit (PostgreSQL writes asynchronously). The
+   * engine calls it synchronously as each live message arrives, in arrival order, and passes the
+   * ticket to the emit, or drops it when the message is not emitted. `needsRoom` says whether the
+   * message will download media; `status` marks a status post. Undefined when the engine is stale.
+   */
+  admitInbound?: (arrival: {
+    id: string;
+    chatId: string;
+    needsRoom: boolean;
+    status: boolean;
+    /** Whether the account itself sent it. Left out where the engine cannot say before it maps the message. */
+    fromMe?: boolean;
+    /** The neutral id of the sender behind a group, status or list message, as `IncomingMessage.author`. */
+    author?: string;
+  }) => InboundTicket | undefined;
+  /**
+   * Fired for each received message. The session may answer with a receipt for what it makes of the
+   * message once its row is settled (see {@link InboundReceipt}); the engine never holds the message back
+   * for it. A change aimed at that message waits for the receipt only when it reads as foreign to the
+   * copy the engine holds under its id; one from that copy's own chat and author is not delayed. A receipt
+   * that fails, or is still unsettled after minutes, is let go of. No receipt comes for a message the
+   * session skips as ephemeral, nor for one the engine does not emit because its sender deleted it while
+   * it was processed and nothing holds it from its arrival (SQLite): the engine's copy of such a message
+   * that reuses another message's id is not reported as a conflict, and stays.
+   */
+  onMessage?: (message: IncomingMessage, ticket?: InboundTicket) => void | InboundReceipt;
   /**
    * Fired for messages the account itself created (outgoing) — including sends composed on a
    * linked phone, which the `message`/`onMessage` event never delivers. Used to emit `message.sent`.
    */
-  onMessageCreate?: (message: IncomingMessage) => void;
+  onMessageCreate?: (message: IncomingMessage, ticket?: InboundTicket) => void;
   /**
    * Fired when the delivery status of an outgoing message advances. The adapter maps its native
    * delivery signal to the neutral `DeliveryStatus`, so consumers never see engine-specific codes.
+   * `chatId` is the conversation the acked message belongs to, canonicalized the same way the
+   * inbound mappers canonicalize `IncomingMessage.chatId`; undefined when the engine's update
+   * carries no chat, and the emitted payload then omits the field rather than guess.
    */
-  onMessageAck?: (messageId: string, status: DeliveryStatus) => void;
-  onMessageRevoked?: (message: RevokedMessage) => void;
+  onMessageAck?: (messageId: string, status: DeliveryStatus, chatId?: string) => void;
+  /**
+   * Fired once per recipient as each one receives, reads or plays a message the account sent to a
+   * group or status. Baileys only: whatsapp-web.js has no per-participant receipt event.
+   */
+  onMessageReceipt?: (event: MessageReceiptEvent) => void;
+  /**
+   * `actor.fromMe` says whether the account itself made the revoke (from its phone). Only an engine that
+   * receives the raw protocol message can say; whatsapp-web.js leaves it out.
+   */
+  onMessageRevoked?: (message: RevokedMessage, actor?: { fromMe: boolean }) => void;
   onMessageReaction?: (event: ReactionEvent) => void;
   onMessageEdited?: (message: EditedMessage) => void;
   /**
-   * Fired on group membership changes (join/leave) and group metadata updates
-   * (subject/description/announce/locked). The `kind` selects the consumer event name
-   * (`group.join` / `group.leave` / `group.update`).
+   * Fired for each RSVP to a WhatsApp event (consumers emit `event.response`). Baileys only: it
+   * decrypts the RSVP itself from the stored event creation message. whatsapp-web.js never fires it.
+   */
+  onEventResponse?: (event: EventResponseEvent) => void;
+  /**
+   * Fired each time a voter changes their selection on a poll (consumers emit `poll.vote`).
+   * whatsapp-web.js only: Baileys never fires it.
+   */
+  onPollVote?: (event: PollVoteEvent) => void;
+  /**
+   * Fired on group membership changes (join/leave), group metadata updates
+   * (subject/description/announce/locked), and pending join requests. The `kind` selects the
+   * consumer event name (`group.join` / `group.leave` / `group.update` / `group.join_request`).
    */
   onGroupEvent?: (event: GroupEvent) => void;
   /**
-   * Fired when an incoming call starts ringing (consumers emit `call.received`). The call can be
-   * rejected via `rejectCall(callId)` only while it is still ringing — the adapter keeps the
-   * engine's live call handle cached for that window.
+   * Fired when an incoming call starts ringing (consumers emit `call.received`). On Baileys the call
+   * can be rejected via `rejectCall(callId)` only while it is still ringing: the adapter keeps what
+   * the rejection needs cached for that window. whatsapp-web.js refuses `rejectCall`.
    */
   onCall?: (event: IncomingCallEvent) => void;
   /**
    * Bulk historical messages from an engine's initial sync (e.g. Baileys `messaging-history.set`).
    * They predate the live session, so consumers persist them for the chat view but must not dispatch.
+   * An async consumer may return stored revocations to keep previews cleared across resyncs.
    */
-  onHistoryMessages?: (messages: IncomingMessage[]) => void;
+  onHistoryMessages?: (messages: IncomingMessage[]) => void | Promise<IncomingMessage[] | void>;
   onDisconnected?: (reason: string) => void;
+  /**
+   * Fired each time the engine schedules an INTERNAL reconnect attempt: a drop it retries on its own
+   * and deliberately does NOT report through `onDisconnected`, because the session is still linked and
+   * the credentials are still good. Purely informational, so a consumer must not tear anything down on
+   * it; the engine keeps owning the retry.
+   *
+   * `attempt` is the 1-based number of the attempt being scheduled. An engine may carry it across a
+   * short-lived connection, so a link that drops right after opening keeps climbing the backoff; it
+   * resets on a scan, when a QR window runs out, or once no drop has occurred for the engine's
+   * stability window. An episode can therefore start at attempt > 1 after a brief READY, so a
+   * consumer should treat the first attempt after a READY, not only attempt 1, as a new episode.
+   * The close that ends an unscanned QR window is not a reconnect and is never reported; any other
+   * close while a QR waits is.
+   * `nextDelayMs` is how long the engine waits before making it. Together they are what a consumer
+   * needs to tell a one-second blip from a session that has been down for an hour, which the status
+   * alone cannot: the engine reports INITIALIZING for the whole episode, exactly as it does for a
+   * session that has never been paired.
+   *
+   * Optional: an engine that hands every drop to its consumer instead of retrying internally
+   * (whatsapp-web.js does) simply never invokes this, because that consumer already has the drop.
+   */
+  onReconnecting?: (attempt: number, nextDelayMs: number) => void;
   onStateChanged?: (state: EngineStatus) => void;
   /**
    * Fired when the engine needs an operator action to keep the session healthy — currently only the
@@ -735,13 +1093,15 @@ export interface EngineEventCallbacks {
    *
    * Unlike the other callbacks, this one is NOT guarded on the engine still being live: a logout
    * that captured the engine registers its destructive promise even as a concurrent stop()/delete()
-   * evicts that engine, because the rm it ends in targets the session NAME's auth dir and would
-   * otherwise race a (re)created session under that same name. The lifecycle tracks the promise
-   * (keyed by the immutable captured session NAME) so start()/delete()/executeReconnect can wait
+   * evicts that engine, because the rm it ends in targets this session's auth dir and would
+   * otherwise race a (re)created session under that same name. The directory is keyed by the session
+   * id; the lifecycle tracks the promise under the immutable captured session NAME, which is unique
+   * per live row and so covers that directory, so start()/delete()/executeReconnect can wait
    * (bounded, fail-closed) for it to settle before touching that path.
    *
-   * Adapters that never remove credentials on their own (e.g. Baileys until a later task wires its
-   * WhatsApp-originated cleanup) simply never invoke this.
+   * Adapters that never remove credentials on their own simply never invoke this. Baileys invokes it for a
+   * WhatsApp-originated unlink (a remote logout): the promise is the cleanup that wipes the stored account
+   * state and the auth directory.
    */
   onCredentialTeardownStarted?: (operation: Promise<void>) => void;
   /**
@@ -763,19 +1123,41 @@ export interface EngineEventCallbacks {
   claimStuckAuthRecovery?: () => boolean;
 }
 
-export interface IWhatsAppEngine {
-  // Lifecycle
+// ---------------------------------------------------------------------------
+// Capability slices
+//
+// The engine surface is one contract per consumer domain rather than one flat list: each
+// interface below is the slice one domain uses, and IWhatsAppEngine at the end of this section
+// composes them all. Adapters keep implementing the union; a consumer that only touches one
+// domain can narrow to the slice it needs. The slices deliberately live in this same file: the
+// parity gate (engine-parity.spec.ts) reads the method inventory straight out of this file's
+// text, so every method declaration stays here, indented as a member, doc comment attached.
+// ---------------------------------------------------------------------------
+
+/**
+ * Session lifecycle, connection health, and identity: start/stop the engine, observe its status,
+ * and read the identity it authenticated as. The QR and pairing-code members are the
+ * link-a-new-session surface.
+ *
+ * Status and liveness stay with lifecycle rather than forming their own slice because the
+ * session-lifecycle consumer uses them for exactly that: deciding whether a session is alive.
+ */
+export interface SessionLifecycleCapability {
   initialize(callbacks: EngineEventCallbacks): Promise<void>;
+
   disconnect(): Promise<void>; // Closes browser but keeps session (can reconnect without QR)
+
   logout(): Promise<void>; // Logs out and clears session data (requires QR scan again)
+
   destroy(): Promise<void>;
+
   // Force-kill THIS engine's own resources immediately (e.g. SIGKILL a wedged Chromium for a stuck
   // session), then best-effort graceful teardown — used to recover a session that destroy() can't.
   // Each adapter kills only its own resources (never a process-wide pkill).
   forceDestroy(): Promise<void>;
 
-  // Status
   getStatus(): EngineStatus;
+
   /**
    * Active liveness probe: performs a real round-trip against the engine's connection and
    * resolves true only when the session is genuinely alive. Implementations must treat probe
@@ -785,13 +1167,26 @@ export interface IWhatsAppEngine {
    * cheap local check. Polled periodically by the session watchdog.
    */
   probeLiveness?(): Promise<boolean>;
-  getQRCode(): string | null;
-  /** Request an 8-char pairing code to link via phone number instead of scanning the QR. */
-  requestPairingCode(phoneNumber: string): Promise<string>;
-  getPhoneNumber(): string | null;
-  getPushName(): string | null;
 
-  // Messaging - Basic
+  getQRCode(): string | null;
+
+  /**
+   * Request an 8-char pairing code to link via phone number instead of scanning the QR. Only valid while
+   * the engine is QR_READY; both adapters throw EngineNotReadyError (409) in any other status.
+   */
+  requestPairingCode(phoneNumber: string): Promise<string>;
+
+  getPhoneNumber(): string | null;
+
+  getPushName(): string | null;
+}
+
+/**
+ * Outbound messaging: every member that composes a NEW message into a chat — text, media,
+ * location, contact card, sticker, poll — plus reply and forward, which are sends that quote or
+ * re-route existing content.
+ */
+export interface MessagingCapability {
   /**
    * Send text.
    *
@@ -803,107 +1198,62 @@ export interface IWhatsAppEngine {
     chatId: string,
     text: string,
     mentions?: string[],
-    options?: { linkPreview?: boolean; customPreview?: CustomLinkPreview },
+    options?: { linkPreview?: boolean; customPreview?: CustomLinkPreview } & Quotable,
   ): Promise<MessageResult>;
+
   sendImageMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
+
   sendVideoMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
+
   sendAudioMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
+
   sendDocumentMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
 
-  // Messaging - Extended (Phase 3)
   sendLocationMessage(chatId: string, location: LocationInput): Promise<MessageResult>;
+
   sendContactMessage(chatId: string, contact: ContactCard): Promise<MessageResult>;
+
   sendStickerMessage(chatId: string, media: MediaInput): Promise<MessageResult>;
+
   sendPollMessage(chatId: string, poll: PollInput): Promise<MessageResult>;
 
-  // Reply & Forward
-  replyToMessage(chatId: string, quotedMsgId: string, text: string): Promise<MessageResult>;
-  forwardMessage(fromChatId: string, toChatId: string, messageId: string): Promise<MessageResult>;
+  /**
+   * Reply to a message, quoting it. `mentions` tags participants exactly as on the send routes: the
+   * text must also carry the matching `@<number>` token for WhatsApp to render the tag.
+   */
+  replyToMessage(chatId: string, quotedMsgId: string, text: string, mentions?: string[]): Promise<MessageResult>;
 
-  // Reactions (Phase 3)
+  forwardMessage(fromChatId: string, toChatId: string, messageId: string): Promise<MessageResult>;
+}
+
+/**
+ * Operations on messages that already exist: delete, edit, star, pin, and the reaction surface.
+ *
+ * votePoll lives here rather than with the poll send in MessagingCapability: it mutates an
+ * existing poll message (the same shape of act as reactToMessage), it does not compose one.
+ */
+export interface MessageOperationsCapability {
   reactToMessage(chatId: string, messageId: string, emoji: string): Promise<void>;
+
   getMessageReactions(chatId: string, messageId: string): Promise<MessageReaction[]>;
 
-  // Contacts
-  getContacts(): Promise<Contact[]>;
-  getContactById(contactId: string): Promise<Contact | null>;
-  checkNumberExists(number: string): Promise<boolean>;
-  /**
-   * Resolve a phone number to its canonical chat id in the neutral dialect (`<phone>@c.us`), or null
-   * if the number is not registered. The engine owns the JID scheme and returns it already neutralized,
-   * so the value is engine-agnostic and round-trips back to a send on any engine.
-   */
-  getNumberId(number: string): Promise<string | null>;
-  /**
-   * Best-effort resolution of a contact id to a phone number (MSISDN digits), or `null` when the
-   * engine cannot map it (e.g. a privacy `@lid` the account has never seen). The contact id is the
-   * engine's native scheme; the adapter decides how to resolve it.
-   */
-  resolveContactPhone(contactId: string): Promise<string | null>;
-
-  // Groups - Basic
-  getGroups(): Promise<Group[]>;
-
-  // Groups - Extended (Phase 3)
-  getGroupInfo(groupId: string): Promise<GroupInfo | null>;
-  createGroup(name: string, participants: string[]): Promise<Group>;
-  /**
-   * Membership writes resolve one {@link ParticipantOperationResult} per participant, so a partial
-   * refusal (one invite-only number among several added) is visible instead of being flattened into
-   * a blanket success. They THROW only when the operation failed for every requested participant —
-   * e.g. the account lacks admin rights — or the batch itself was refused.
-   */
-  addParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
-  removeParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
-  promoteParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
-  demoteParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
-  leaveGroup(groupId: string): Promise<void>;
-  setGroupSubject(groupId: string, subject: string): Promise<void>;
-  setGroupDescription(groupId: string, description: string): Promise<void>;
-  getGroupInviteCode(groupId: string): Promise<string>;
-  revokeGroupInviteCode(groupId: string): Promise<string>;
-  /**
-   * Join a group via an invite code (the token from a `https://chat.whatsapp.com/<code>` link).
-   * Resolves with the joined group's neutral id (`<id>@g.us`).
-   */
-  joinGroupViaInviteCode(inviteCode: string): Promise<string>;
-  /**
-   * What an invite code discloses about a group, without joining it. Read-only: nothing about the
-   * account's membership changes, which is what makes it safe to call on an untrusted code.
-   */
-  getGroupJoinInfo(inviteCode: string): Promise<GroupJoinInfo>;
-  /** Set the "only admins can send messages" group setting (WhatsApp announce). */
-  setGroupMessagesAdminsOnly(groupId: string, adminsOnly: boolean): Promise<void>;
-  /** Set the "only admins can edit group info" group setting (WhatsApp locked/restrict). */
-  setGroupInfoAdminsOnly(groupId: string, adminsOnly: boolean): Promise<void>;
-  /**
-   * Set the group's picture. Requires admin rights on both engines; the engines report a refusal
-   * differently, so the adapters normalise it. Reading the current picture needs no dedicated
-   * method — `getProfilePicture` accepts a group JID.
-   */
-  setGroupPicture(groupId: string, media: MediaInput): Promise<void>;
-  /** Remove the group's picture. */
-  deleteGroupPicture(groupId: string): Promise<void>;
-  /** Set who may add participants to the group. */
-  setGroupMemberAddMode(groupId: string, mode: GroupMemberAddMode): Promise<void>;
-  /**
-   * Set the group's disappearing-messages timer in seconds; 0 disables it.
-   * Known values: 86400 (24h), 604800 (7d), 7776000 (90d).
-   */
-  setGroupEphemeral(groupId: string, durationSec: number): Promise<void>;
-
-  // Message Operations
   deleteMessage(chatId: string, messageId: string, forEveryone?: boolean): Promise<void>;
+
   /**
    * Edit the body of a text message. Only the account's OWN messages can be edited; engines reject
    * non-text or foreign messages at their own layer — the engine's error is surfaced as-is.
+   *
+   * `mentions` re-applies participant tags to the new body. An edit REPLACES the message content, so
+   * omitting it drops whatever tags the original carried rather than preserving them.
    */
-  editMessage(chatId: string, messageId: string, body: string): Promise<MessageResult>;
+  editMessage(chatId: string, messageId: string, body: string, mentions?: string[]): Promise<MessageResult>;
+
   /**
    * Star (bookmark) a message, or remove its star. Starring is a private, account-local marker —
    * it is not visible to the other party and has no group-admin restriction.
    */
   starMessage(chatId: string, messageId: string, star: boolean): Promise<void>;
+
   /**
    * Cast a vote on a poll. `options` are the option TEXTS, not ids: whatsapp-web.js matches by name
    * (`Message.js:1027-1031`), and no engine surfaces a stable per-option id through this interface,
@@ -915,6 +1265,20 @@ export interface IWhatsAppEngine {
    * duplicates, and the name is the only handle available.
    */
   votePoll(chatId: string, pollMessageId: string, options: string[]): Promise<void>;
+
+  /**
+   * Reply to a WhatsApp Business button / list prompt as if the account tapped a choice.
+   * `buttonId` is the stable id from the prompt (see inbound `buttons[].id`); `text` is the visible
+   * label when known. **Baileys only**: whatsapp-web.js has no interactive-reply send path.
+   *
+   * The prompt must already be in the engine message store (received while the session was live).
+   * Classic `buttonsMessage` / `templateMessage` / `listMessage` prompts go through Baileys'
+   * `buttonReply` / `listReply` helpers. Native-flow `interactiveMessage` replies are unverified
+   * against a live business prompt and must not be treated as fully supported. URL/call CTA
+   * buttons are not clickable this way, only quick-reply style choices and list rows.
+   */
+  clickButton(chatId: string, messageId: string, buttonId: string, text?: string): Promise<MessageResult>;
+
   /**
    * Pin a message in its chat for a bounded window. WhatsApp only recognises three durations —
    * 86400 (24h), 604800 (7d), 2592000 (30d) — so `durationSeconds` must be one of those; it is
@@ -922,16 +1286,26 @@ export interface IWhatsAppEngine {
    * admins may pin; the engines surface their own refusal.
    */
   pinMessage(chatId: string, messageId: string, durationSeconds: number): Promise<void>;
+
   /** Remove a message's pin. Unpinning takes no duration — an existing pin's window is irrelevant. */
   unpinMessage(chatId: string, messageId: string): Promise<void>;
+}
+
+/**
+ * Reading a chat's stored messages. Kept apart from the chat-management slice because this is
+ * the engine's only media-bearing read path — the media budget parameters are a download
+ * concern no other member shares.
+ */
+export interface ChatHistoryCapability {
   /**
-   * Read a chat's recent messages, newest first. When `includeMedia` downloads blobs, an optional
-   * `mediaMaxBytes` tightens the declared-size pre-gate below the global MEDIA_DOWNLOAD_MAX_BYTES —
+   * Read a chat's most recent `limit` messages, returned oldest first (ascending timestamp). When
+   * `includeMedia` downloads blobs, an optional `mediaMaxBytes` tightens the declared-size pre-gate
+   * below the global MEDIA_DOWNLOAD_MAX_BYTES —
    * the status seed uses it to skip downloads the store would discard as over-cap anyway.
-   * Inlined media is additionally bounded in aggregate (CHAT_HISTORY_MEDIA_BUDGET_BYTES): once the
-   * running base64 total crosses the budget, later media messages carry the `omitted` marker instead
-   * of a download. An optional `signal` (e.g. client disconnect) stops the read loop early; the
-   * messages collected so far are returned.
+   * Inlined media is additionally bounded in aggregate (CHAT_HISTORY_MEDIA_BUDGET_BYTES), spent in
+   * that same order: once the running base64 total crosses the budget, the newer media messages
+   * carry the `omitted` marker instead of a download. An optional `signal` (e.g. client disconnect)
+   * stops the read loop early; the messages collected so far are returned.
    */
   getChatHistory(
     chatId: string,
@@ -940,19 +1314,57 @@ export interface IWhatsAppEngine {
     mediaMaxBytes?: number,
     signal?: AbortSignal,
   ): Promise<IncomingMessage[]>;
+}
 
-  // Calls
+/**
+ * Contacts and the account's addressbook: reads, number/identity resolution, the blocklist, and
+ * addressbook writes.
+ *
+ * getProfilePicture sits here rather than with profiles: it reads any party's picture (a group
+ * JID included — see setGroupPicture), and its consumer domain is contact data.
+ */
+export interface ContactCapability {
   /**
-   * Reject an incoming call. Only a currently-ringing call can be rejected: the adapter keeps the
-   * engine's live call handle (keyed by the `callId` from {@link IncomingCallEvent}) for the
-   * ringing window, and an unknown or expired callId fails with a not-found error (HTTP 404).
+   * Defaults to reporting lookup answers. `seed` keeps positive lookups as display data and revokes alias
+   * trust on a conflicting phone; null still uses owner-aware clearing.
    */
-  rejectCall(callId: string): Promise<void>;
+  readonly contactPhoneLookupPersistence?: 'seed';
 
-  // Contact Extended Operations
+  getContacts(): Promise<Contact[]>;
+
+  getContactById(contactId: string): Promise<Contact | null>;
+
+  checkNumberExists(number: string): Promise<boolean>;
+
+  /**
+   * Resolve a phone number to its canonical chat id in the neutral dialect (`<phone>@c.us`), or null
+   * if the number is not registered. The engine owns the JID scheme and returns it already neutralized,
+   * so the value is engine-agnostic and round-trips back to a send on any engine.
+   */
+  getNumberId(number: string): Promise<string | null>;
+
+  /**
+   * Best-effort resolution of a contact id to a phone number (MSISDN digits). `null` is a definitive
+   * "no phone for this id"; a lookup that could not decide (a failed page read, or a lid no cache,
+   * table or key store maps) rejects instead, so a caller that stores the answer never overwrites a
+   * known mapping with a null. The contact id is the engine's native scheme; the adapter decides how
+   * to resolve it.
+   */
+  resolveContactPhone(contactId: string): Promise<string | null>;
+
   getProfilePicture(contactId: string): Promise<string | null>;
+
   blockContact(contactId: string): Promise<void>;
+
   unblockContact(contactId: string): Promise<void>;
+
+  /**
+   * Neutral ids of the contacts this account has blocked — the read half of block/unblockContact.
+   * Ids only: whatsapp-web.js resolves full Contact models, but Baileys' blocklist query answers
+   * bare jids, and inventing the other fields on one engine would make the two engines claim
+   * different things about the same account.
+   */
+  getBlockedContacts(): Promise<string[]>;
 
   /**
    * Save a contact to the account's addressbook, or edit an existing entry. `contactId` is a
@@ -960,92 +1372,411 @@ export interface IWhatsAppEngine {
    * adapters convert. An empty `lastName` is normal — WhatsApp stores single-name contacts.
    */
   upsertContact(contactId: string, firstName: string, lastName?: string): Promise<void>;
+
   /** Remove a contact from the account's addressbook. Does not block or delete the chat. */
   deleteContact(contactId: string): Promise<void>;
+}
 
-  // Profile (own account)
+/** Groups: reads, membership writes, settings mutations, invites, and join approvals. */
+export interface GroupCapability {
+  getGroups(): Promise<Group[]>;
+
+  getGroupInfo(groupId: string): Promise<GroupInfo | null>;
+
+  createGroup(name: string, participants: string[]): Promise<Group>;
+
+  /**
+   * Membership writes resolve one {@link ParticipantOperationResult} per participant, so a partial
+   * refusal (one invite-only number among several added) is visible instead of being flattened into
+   * a blanket success. They THROW only when the operation failed for every requested participant —
+   * e.g. the account lacks admin rights — or the batch itself was refused.
+   */
+  addParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
+
+  removeParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
+
+  promoteParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
+
+  demoteParticipants(groupId: string, participants: string[]): Promise<ParticipantOperationResult[]>;
+
+  leaveGroup(groupId: string): Promise<void>;
+
+  setGroupSubject(groupId: string, subject: string): Promise<void>;
+
+  setGroupDescription(groupId: string, description: string): Promise<void>;
+
+  getGroupInviteCode(groupId: string): Promise<string>;
+
+  revokeGroupInviteCode(groupId: string): Promise<string>;
+
+  /**
+   * Join a group via an invite code (the token from a `https://chat.whatsapp.com/<code>` link).
+   * Resolves with the joined group's neutral id (`<id>@g.us`).
+   */
+  joinGroupViaInviteCode(inviteCode: string): Promise<string>;
+
+  /**
+   * What an invite code discloses about a group, without joining it. Read-only: nothing about the
+   * account's membership changes, which is what makes it safe to call on an untrusted code.
+   */
+  getGroupJoinInfo(inviteCode: string): Promise<GroupJoinInfo>;
+
+  /** Set the "only admins can send messages" group setting (WhatsApp announce). */
+  setGroupMessagesAdminsOnly(groupId: string, adminsOnly: boolean): Promise<void>;
+
+  /** Set the "only admins can edit group info" group setting (WhatsApp locked/restrict). */
+  setGroupInfoAdminsOnly(groupId: string, adminsOnly: boolean): Promise<void>;
+
+  /**
+   * Set the group's picture. Requires admin rights on both engines; the engines report a refusal
+   * differently, so the adapters normalise it. Reading the current picture needs no dedicated
+   * method — `getProfilePicture` accepts a group JID.
+   */
+  setGroupPicture(groupId: string, media: MediaInput): Promise<void>;
+
+  /** Remove the group's picture. */
+  deleteGroupPicture(groupId: string): Promise<void>;
+
+  /** Set who may add participants to the group. */
+  setGroupMemberAddMode(groupId: string, mode: GroupMemberAddMode): Promise<void>;
+
+  /**
+   * Set the group's disappearing-messages timer in seconds; 0 disables it.
+   * Known values: 86400 (24h), 604800 (7d), 7776000 (90d).
+   */
+  setGroupEphemeral(groupId: string, durationSec: number): Promise<void>;
+
+  /**
+   * Set this account's own member label in the group (the per-group tag shown beside its name); an empty
+   * string clears it. Resolves once the label message is handed to WhatsApp: it travels as a group
+   * protocol message with no per-request confirmation, and group metadata does not carry the label back.
+   */
+  setGroupMemberLabel(groupId: string, label: string): Promise<void>;
+
+  /**
+   * Pending join requests for a group with join-approval turned on. Admin-only on both engines;
+   * a non-admin's read is refused by the engine and surfaced as-is.
+   */
+  getGroupMembershipRequests(groupId: string): Promise<GroupMembershipRequest[]>;
+
+  /**
+   * Approve pending join requests — the named participants, or EVERY pending request when
+   * `participants` is omitted. Per-participant outcomes follow the membership-write contract
+   * (see addParticipants); the all-failed/no-outcome guards apply only when participants were
+   * NAMED — approving an empty queue is a no-op that resolves [].
+   */
+  approveGroupMembershipRequests(groupId: string, participants?: string[]): Promise<ParticipantOperationResult[]>;
+
+  /** Reject pending join requests; same contract as approveGroupMembershipRequests. */
+  rejectGroupMembershipRequests(groupId: string, participants?: string[]): Promise<ParticipantOperationResult[]>;
+}
+
+/**
+ * Calls: rejecting a ringing call and generating call links. Call EVENTS arrive through
+ * EngineEventCallbacks (onCall / onCallOutcome), not through this slice.
+ */
+export interface CallCapability {
+  /**
+   * Reject an incoming call. Only a currently-ringing call can be rejected: the Baileys adapter keeps
+   * the caller JID it needs (keyed by the `callId` from {@link IncomingCallEvent}) for the ringing
+   * window, and an unknown or expired callId fails with a not-found error (HTTP 404). whatsapp-web.js
+   * throws EngineNotSupportedError (HTTP 501): a rejection it sent did not stop a live call ringing.
+   */
+  rejectCall(callId: string): Promise<void>;
+
+  /**
+   * Generate a shareable WhatsApp call link, returning the finished `https://call.whatsapp.com/…`
+   * URL. `startTime` is an absolute epoch-MILLISECONDS timestamp; both engines take seconds on the
+   * wire and each adapter converts.
+   *
+   * The engines return different things and the adapters reconcile them: whatsapp-web.js resolves
+   * the finished link (or `''` on failure), Baileys resolves only the bare token and the adapter
+   * assembles it behind the library's own prefix. A WhatsApp-side failure throws rather than
+   * returning an empty or prefix-only link, which would look like a working link and is not one.
+   */
+  createCallLink(type: CallLinkType, startTime: number): Promise<string>;
+}
+
+/**
+ * The account's OWN profile: display name, about text, and picture. Distinct from
+ * ContactCapability, which reads and writes other parties.
+ */
+export interface ProfileCapability {
   /** Set the account's display name. */
   setProfileName(name: string): Promise<void>;
+
   /** Set the account's "about" / status text. */
   setProfileStatus(status: string): Promise<void>;
+
   /** Set the account's profile picture (a URL payload is fetched server-side). */
   setProfilePicture(media: MediaInput): Promise<void>;
 
-  // Labels (Phase 3) - WhatsApp Business only
+  /**
+   * Remove the account's own profile picture. Resolves when the removal is acknowledged; deleting a
+   * picture that is not there is a no-op rather than an error, so the call is idempotent.
+   *
+   * Only whatsapp-web.js can report a refusal, and only as an explicit `false` — its page helper
+   * also returns `undefined` when it did not attempt the delete at all, which is NOT a refusal.
+   * Baileys resolves void and has no refusal signal, so it reports success for any acknowledged
+   * write.
+   */
+  deleteProfilePicture(): Promise<void>;
+}
+
+/**
+ * Labels (WhatsApp Business): label reads and writes, and the label-to-chat assignment surface.
+ * A non-business account has no labels at all.
+ */
+export interface LabelCapability {
   getLabels(): Promise<Label[]>;
+
   getLabelById(labelId: string): Promise<Label | null>;
+
   getChatLabels(chatId: string): Promise<Label[]>;
+
   addLabelToChat(chatId: string, labelId: string): Promise<void>;
+
   /**
    * Create or update a label, keyed on `label.id`. One operation, not two: the engines express both
    * through a single app-state write, and which one happens depends on whether the id already
    * exists. Only fields that are set are changed.
    */
+  upsertLabel(label: LabelInput): Promise<void>;
+
+  /** Delete a label. It disappears from every chat it was on. */
+  deleteLabel(labelId: string): Promise<void>;
+
+  /** Every chat carrying a label. */
+  getChatsByLabel(labelId: string): Promise<ChatSummary[]>;
+
+  removeLabelFromChat(chatId: string, labelId: string): Promise<void>;
+}
+
+/** Channels/newsletters: subscription, reads, and the owner-only administration writes. */
+export interface ChannelCapability {
+  getSubscribedChannels(): Promise<Channel[]>;
+
+  getChannelById(channelId: string): Promise<Channel | null>;
+
+  subscribeToChannel(inviteCode: string): Promise<Channel>;
+
+  unsubscribeFromChannel(channelId: string): Promise<void>;
+
+  getChannelMessages(channelId: string, limit?: number): Promise<ChannelMessage[]>;
+
   /**
    * Create a channel and return it. The account becomes its owner, which is what makes deleting it
    * possible later — neither engine can delete a channel it does not own.
    */
   createChannel(name: string, description?: string): Promise<Channel>;
+
   /** Delete a channel this account owns. Irreversible, and its subscribers lose it. */
   deleteChannel(channelId: string): Promise<void>;
+
   /** Mute or unmute a channel's notifications for this account. Does not affect subscription. */
   muteChannel(channelId: string, mute: boolean): Promise<void>;
-  upsertLabel(label: LabelInput): Promise<void>;
-  /** Delete a label. It disappears from every chat it was on. */
-  deleteLabel(labelId: string): Promise<void>;
-  /** Every chat carrying a label. */
-  getChatsByLabel(labelId: string): Promise<ChatSummary[]>;
-  removeLabelFromChat(chatId: string, labelId: string): Promise<void>;
 
-  // Channels/Newsletter (Phase 3)
-  getSubscribedChannels(): Promise<Channel[]>;
-  getChannelById(channelId: string): Promise<Channel | null>;
-  subscribeToChannel(inviteCode: string): Promise<Channel>;
-  unsubscribeFromChannel(channelId: string): Promise<void>;
-  getChannelMessages(channelId: string, limit?: number): Promise<ChannelMessage[]>;
+  /**
+   * Demote a channel admin back to a plain subscriber. Requires this account to own the channel.
+   *
+   * There is deliberately no promote counterpart: neither library has one — Baileys exposes no
+   * `newsletterPromote` and whatsapp-web.js no `promoteChannelAdmin` — so an admin is promoted from
+   * the WhatsApp app and can then be demoted here.
+   */
+  demoteChannelAdmin(channelId: string, userId: string): Promise<void>;
 
-  // Status/Stories (Phase 3)
+  /**
+   * Hand a channel this account owns to a new owner. **Irreversible** — the account stops being the
+   * owner and cannot take it back through this API.
+   *
+   * The whatsapp-web.js option to also dismiss yourself as admin in the same call is not exposed:
+   * the page function it relies on no longer exists, and it sits inside a branch that swallows its
+   * own errors, so it would fail silently rather than refusing.
+   */
+  transferChannelOwnership(channelId: string, newOwnerId: string): Promise<void>;
+}
+
+/** Status/stories: reading contacts' statuses and posting or deleting the account's own. */
+export interface StatusCapability {
   getContactStatuses(): Promise<Status[]>;
+
   getContactStatus(contactId: string): Promise<Status[]>;
+
   postTextStatus(text: string, options: StatusPostOptions): Promise<StatusResult>;
+
   postImageStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult>;
+
   postVideoStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult>;
+
   /**
    * Post an audio status as a voice note. WhatsApp plays a status voice note only for Ogg/Opus, and
    * neither engine transcodes — the media conversion endpoints exist to produce it.
    */
   postVoiceStatus(media: MediaInput, options: StatusPostOptions): Promise<StatusResult>;
+
   deleteStatus(statusId: string): Promise<void>;
+}
 
-  // Catalog (Phase 3) - WhatsApp Business only
+/**
+ * Catalog (WhatsApp Business): catalog and product reads. sendProduct and sendCatalog stay here
+ * rather than in MessagingCapability — they ship a catalog entity into a chat, and their consumer
+ * is the commerce domain, so a messaging-only dependency need not carry them.
+ */
+export interface CatalogCapability {
   getCatalog(): Promise<Catalog | null>;
-  getProducts(options?: ProductQueryOptions): Promise<PaginatedProducts>;
-  getProduct(productId: string): Promise<Product | null>;
-  sendProduct(chatId: string, productId: string, body?: string): Promise<MessageResult>;
-  sendCatalog(chatId: string, body?: string): Promise<MessageResult>;
 
-  // Chats
-  getChats(): Promise<ChatSummary[]>;
-  sendSeen(chatId: string): Promise<boolean>;
-  markUnread(chatId: string): Promise<boolean>;
-  deleteChat(chatId: string): Promise<boolean>;
+  getProducts(options?: ProductQueryOptions): Promise<PaginatedProducts>;
+
+  getProduct(productId: string): Promise<Product | null>;
+
+  sendProduct(chatId: string, productId: string, body?: string): Promise<MessageResult>;
+
+  sendCatalog(chatId: string, body?: string): Promise<MessageResult>;
+}
+
+/**
+ * The newest message the gateway stored for a chat (the `messages` table), in the shape an engine
+ * that keys chat writes to a message needs to rebuild that message's key.
+ */
+export interface StoredChatMessage {
+  /** The WhatsApp message id. */
+  id: string;
+  fromMe: boolean;
+  /** The sender of a group message that is not from me, as stored (neutral dialect); absent otherwise. */
+  author?: string;
+  /** Epoch seconds. */
+  timestamp: number;
   /**
-   * Archive or unarchive a chat. Resolves false when the engine cannot act — on Baileys the
-   * archive is an app-state modification keyed to the chat's last message, so a chat with no known
-   * history cannot be archived at all. Same shape as deleteChat/markUnread, which share that limit.
+   * The `<lid>@lid` of a 1:1 chat, and of `author`, as the persisted lid mapping holds them. Read from
+   * the table rather than an in-memory cache, which can lack a mapping; absent when none is known.
    */
-  archiveChat(chatId: string, archive: boolean): Promise<boolean>;
+  lid?: string;
+  authorLid?: string;
+}
+
+/**
+ * Reads the newest stored message of the chat a write is for, across the chat's id forms. Engines
+ * call it only when they know no message of the chat themselves, so a lookup costs nothing when it is
+ * not needed; it resolves null when the gateway stored none.
+ */
+export type StoredChatMessageLookup = () => Promise<StoredChatMessage | null>;
+
+/**
+ * Chat-list management: enumeration and per-chat flags (seen, unread, archive, pin, mute,
+ * clear). These operate on the chat itself; pinning a message INSIDE a chat is
+ * MessageOperationsCapability.pinMessage.
+ *
+ * Baileys keys sendSeen, markUnread, archiveChat, clearChatMessages and deleteChat to a message of the
+ * chat, and holds the chat's messages only in memory since its session started. `stored` is the
+ * gateway's fallback for a chat with no message since then; whatsapp-web.js needs none and ignores it.
+ */
+export interface ChatCapability {
+  getChats(): Promise<ChatSummary[]>;
+
+  /**
+   * `messageIds` names exactly which messages to acknowledge. Engines that acknowledge per
+   * message (Baileys) need it to mark a burst; without it they acknowledge the newest received
+   * message they know, else the newest received one `stored` finds. Engines with a chat-level
+   * receipt (whatsapp-web.js) ignore both.
+   *
+   * `authors` maps a message id to who posted it, for a group: a receipt names its sender, and an id the
+   * engine never kept (history backfill) has no key to read it from. An id with neither is not acknowledged.
+   */
+  sendSeen(
+    chatId: string,
+    messageIds?: string[],
+    authors?: ReadonlyMap<string, string>,
+    stored?: StoredChatMessageLookup,
+  ): Promise<boolean>;
+
+  /**
+   * Resolves false when the engine cannot act. On Baileys an archived chat needs a known message to
+   * key the mark to; a chat that is not archived is marked without one if the session knows it.
+   */
+  markUnread(chatId: string, stored?: StoredChatMessageLookup): Promise<boolean>;
+
+  /**
+   * Resolves false when the engine cannot act — on Baileys a chat with no known message at all, since
+   * the delete removes the messages up to the one it is keyed to and guessing that is not safe.
+   */
+  deleteChat(chatId: string, stored?: StoredChatMessageLookup): Promise<boolean>;
+
+  /**
+   * Archive or unarchive a chat. Baileys keys the change to a known message of the chat and sends it
+   * without one when none is known, which WhatsApp applies as well, but only for a chat the session
+   * knows (a chat record, a persisted state row or a stored message); otherwise it resolves false.
+   */
+  archiveChat(chatId: string, archive: boolean, stored?: StoredChatMessageLookup): Promise<boolean>;
+
+  /**
+   * Pin or unpin a chat at the top of the chat list. Chat-level — distinct from `pinMessage`, which
+   * pins a message inside a chat.
+   *
+   * Resolves false only when the engine DECLINED, and only one direction can: WhatsApp allows at
+   * most three pinned chats, and whatsapp-web.js reports the refusal rather than silently dropping
+   * it. Unpinning always resolves true, and Baileys always resolves true in both directions — it
+   * writes an app-state patch and WhatsApp reports nothing back, so it cannot see the cap. Unlike
+   * archiveChat the patch carries no `lastMessages`, so a chat with no known history pins fine.
+   */
+  pinChat(chatId: string, pin: boolean): Promise<boolean>;
+
+  /**
+   * Mute or unmute a chat's notifications. `muteUntil` is an absolute epoch-MILLISECONDS timestamp
+   * the mute expires at; `null` unmutes now. To mute indefinitely, pass a far-future timestamp —
+   * neither engine exposes a portable "forever" sentinel (whatsapp-web.js uses -1 internally,
+   * Baileys has none), so the contract keeps a single well-defined shape instead.
+   *
+   * Milliseconds is measured, not inferred. WhatsApp's app-state `MuteAction.muteEndTimestamp` is
+   * unsuffixed while the proto spells other millisecond fields `…Ms`, which reads as seconds and is
+   * wrong: sending an epoch-seconds value live left the chat unmuted (the instant had already
+   * passed in 1970), and the same instant sent in milliseconds muted it to the expected minute.
+   * Getting this backwards is silent — the send still answers 200 and the mute simply never applies,
+   * or lands tens of thousands of years out and reads as permanent.
+   *
+   * Unlike clearChatMessages/deleteChat this has no "engine declined" outcome: the Baileys `mute`
+   * app-state modification carries no `lastMessages`, so a chat with no known history mutes like
+   * any other. That is why it resolves void rather than boolean.
+   */
+  muteChat(chatId: string, muteUntil: number | null): Promise<void>;
+
   /**
    * Delete every message in a chat while keeping the chat itself in the list. Resolves false when
-   * the engine cannot act — an unknown chat on whatsapp-web.js, or (as with archiveChat) a chat
-   * with no known history on Baileys, whose clear is keyed to the last message.
+   * the engine cannot act — an unknown chat on whatsapp-web.js, or (as with deleteChat) a chat with
+   * no known message at all on Baileys, whose clear is keyed to the last message.
    */
-  clearChatMessages(chatId: string): Promise<boolean>;
+  clearChatMessages(chatId: string, stored?: StoredChatMessageLookup): Promise<boolean>;
+}
+
+/**
+ * Presence: chat typing/recording indicators, the account's own online visibility, and presence
+ * subscriptions (delivered through onPresenceUpdate).
+ */
+export interface PresenceCapability {
   /**
    * Send a typing/recording presence indicator to a chat, or clear it (`paused`).
    * Engine-agnostic and best-effort: engines without a presence concept should no-op.
    */
   sendChatState(chatId: string, state: ChatState): Promise<void>;
+
+  /**
+   * Publish the ACCOUNT's own global presence: `true` = appear online, `false` = appear offline.
+   * A linked device that announces itself online routes notifications away from the phone, so a
+   * headless bot that never goes offline suppresses the phone's own alerts — which is why this is
+   * NOT best-effort, unlike sendChatState: the caller asked for a specific visibility, and a
+   * swallowed failure would leave the account silently online. Chat-state updates are a separate
+   * wire operation (`<chatstate>` / `sendStateTyping`) and do not publish this.
+   *
+   * The call itself is one-shot. The gateway remembers a successful one for the life of the running
+   * engine and re-applies it once each time that connection opens: Baileys announces itself on
+   * connect per `markOnlineOnConnect` (`available` by default), which would otherwise replace the
+   * caller's choice on a transient reconnect. Replacing the engine drops the preference: stop,
+   * restart, reconnect recovery, a watchdog recycle, or a takeover by another node.
+   *
+   * On Baileys this throws when the account push name is not set yet. `sendPresenceUpdate`
+   * resolves without sending in that case (`no name present, ignoring presence update request`).
+   */
+  setOnlinePresence(available: boolean): Promise<void>;
+
   /**
    * Ask WhatsApp to start reporting a chat's presence, delivered through `onPresenceUpdate`.
    *
@@ -1059,3 +1790,25 @@ export interface IWhatsAppEngine {
    */
   subscribeToPresence(chatId: string): Promise<void>;
 }
+
+/**
+ * The complete engine contract: every capability slice above, composed. Nothing is declared here
+ * directly — a member belongs to the slice its consumer domain forms, so an engine-wide member
+ * would mean a domain that has no other surface. Adapters implement this union unchanged.
+ */
+export interface IWhatsAppEngine
+  extends
+    SessionLifecycleCapability,
+    MessagingCapability,
+    MessageOperationsCapability,
+    ChatHistoryCapability,
+    ContactCapability,
+    GroupCapability,
+    CallCapability,
+    ProfileCapability,
+    LabelCapability,
+    ChannelCapability,
+    StatusCapability,
+    CatalogCapability,
+    ChatCapability,
+    PresenceCapability {}

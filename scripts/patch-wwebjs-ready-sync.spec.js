@@ -8,6 +8,7 @@ const path = require('path');
 
 const {
   applyReadySyncPatch,
+  isApplied,
   FLAG_INIT_FIND,
   FLAG_INIT_REPLACE,
   ATTACH_MARK_FIND,
@@ -45,6 +46,15 @@ test('applies all three edits to a pristine upstream tree', () => {
   for (const replacement of [FLAG_INIT_REPLACE, ATTACH_MARK_REPLACE, HAS_SYNCED_REPLACE]) {
     assert.ok(patched.includes(replacement));
   }
+});
+
+test('isApplied is false on a pristine tree and true once the patch has run', () => {
+  const { dir } = fakeWwjs(PRISTINE);
+
+  // Each replacement contains its own find, so a raw find count would read a patched tree as pristine.
+  assert.equal(isApplied(dir), false);
+  applyReadySyncPatch(dir);
+  assert.equal(isApplied(dir), true);
 });
 
 test('is idempotent — a second run is a no-op, not a double patch', () => {
@@ -86,6 +96,7 @@ test('CLI: unrecognised tree exits 1 bare and 0 under --best-effort', () => {
   fs.mkdirSync(path.join(root, 'scripts'));
   const script = path.join(root, 'scripts', 'patch-wwebjs-ready-sync.js');
   fs.copyFileSync(path.join(__dirname, 'patch-wwebjs-ready-sync.js'), script);
+  fs.copyFileSync(path.join(__dirname, 'atomic-write.js'), path.join(path.dirname(script), 'atomic-write.js'));
   const clientDir = path.join(root, 'node_modules', 'whatsapp-web.js', 'src');
   fs.mkdirSync(clientDir, { recursive: true });
   fs.writeFileSync(path.join(clientDir, 'Client.js'), 'class Client {}\n');

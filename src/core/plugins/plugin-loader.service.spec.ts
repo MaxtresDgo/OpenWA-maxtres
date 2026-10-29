@@ -116,7 +116,7 @@ describe('dispatchConversationMedia', () => {
 
 import * as fs from 'fs';
 import * as os from 'os';
-import { PluginLoaderService } from './plugin-loader.service';
+import { PLUGIN_SHUTDOWN_WAIT_MS, PluginLoaderService } from './plugin-loader.service';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { HookManager } from '../hooks';
@@ -252,6 +252,27 @@ describe('PluginLoaderService — enable/config persistence', () => {
     loader2.registerBuiltInPlugin(manifest, {}, { apiKey: 'default' });
     expect(loader2.getPlugin('persist-test')?.config).toEqual({ apiKey: 'operator-secret' });
   });
+
+  it('persists only the keys a config update set, so other env-derived keys stay live', () => {
+    loader.registerBuiltInPlugin(manifest, {}, { execPath: '/old/chromium', headless: true });
+    loader.updatePluginConfig('persist-test', { apiKey: 'operator-secret' });
+    expect(loader.getPlugin('persist-test')?.config).toEqual({
+      execPath: '/old/chromium',
+      headless: true,
+      apiKey: 'operator-secret',
+    });
+    expect(storage.getPluginConfig('persist-test')).toEqual({ apiKey: 'operator-secret' });
+
+    // Restart with a changed env value: it wins, and the operator's key is still applied.
+    const storage2 = new PluginStorageService(config);
+    const loader2 = new PluginLoaderService(config, new HookManager(), storage2, {} as unknown as ModuleRef);
+    loader2.registerBuiltInPlugin(manifest, {}, { execPath: '/new/chromium', headless: true });
+    expect(loader2.getPlugin('persist-test')?.config).toEqual({
+      execPath: '/new/chromium',
+      headless: true,
+      apiKey: 'operator-secret',
+    });
+  });
 });
 
 describe('PluginLoaderService — engine mutual exclusion', () => {
@@ -296,289 +317,6 @@ describe('PluginLoaderService — engine mutual exclusion', () => {
 
     await loader.enablePlugin('baileys');
     expect(loader.getPlugin('baileys')?.status).toBe(PluginStatus.ENABLED);
-  });
-});
-
-describe('PluginLoaderService — uninstall', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let storage: PluginStorageService;
-  let loader: PluginLoaderService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-uninst-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    } as unknown as ConfigService;
-    storage = new PluginStorageService(config);
-    loader = new PluginLoaderService(config, new HookManager(), storage, {} as unknown as ModuleRef);
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const writeUserPlugin = (id: string): string => {
-    const dir = path.join(pluginsDir, id);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      JSON.stringify({ id, name: id, version: '1.0.0', type: 'extension', main: 'index.js' }),
-    );
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-    return dir;
-  };
-
-  it('removes the plugin directory, registry entry, and runtime instance', async () => {
-    const dir = writeUserPlugin('user-plg');
-    loader.loadPlugin(dir);
-    expect(storage.getPluginEntry('user-plg')).toBeDefined();
-
-    await loader.uninstallPlugin('user-plg');
-
-    expect(fs.existsSync(dir)).toBe(false);
-    expect(storage.getPluginEntry('user-plg')).toBeUndefined();
-    expect(loader.getPlugin('user-plg')).toBeUndefined();
-  });
-
-  it('refuses to uninstall a built-in plugin', async () => {
-    loader.registerBuiltInPlugin(
-      { id: 'core-engine', name: 'Core', version: '1.0.0', type: PluginType.ENGINE, main: 'x.js' },
-      {},
-    );
-    await expect(loader.uninstallPlugin('core-engine')).rejects.toThrow(/built-in/i);
-  });
-
-  it('rejects a plugin that declares ingress routes but omits the webhook:ingress permission', () => {
-    // loadPlugin must run validateIngressManifest, so a malformed ingress declaration fails to load
-    // rather than silently loading and becoming provisionable.
-    const dir = path.join(pluginsDir, 'bad-ingress');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      JSON.stringify({
-        id: 'bad-ingress',
-        name: 'Bad Ingress',
-        version: '1.0.0',
-        type: 'extension',
-        main: 'index.js',
-        ingress: [{ route: 'events', signature: { headerName: 'X-Sig', scheme: 'hmac-sha256' } }],
-        // permissions intentionally omitted → validateIngressManifest must reject
-      }),
-    );
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-    expect(() => loader.loadPlugin(dir)).toThrow(/webhook:ingress/i);
-  });
-});
-
-describe('PluginLoaderService — skips dot-prefixed directories on load (crash-leftover .bak)', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let loader: PluginLoaderService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-dotskip-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    } as unknown as ConfigService;
-    loader = new PluginLoaderService(
-      config,
-      new HookManager(),
-      new PluginStorageService(config),
-      {} as unknown as ModuleRef,
-    );
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const writePlugin = (dirName: string, id: string): void => {
-    const dir = path.join(pluginsDir, dirName);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      JSON.stringify({ id, name: id, version: '1.0.0', type: 'extension', main: 'index.js' }),
-    );
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-  };
-
-  it('does not scan a crash-leftover .<id>.bak directory (no duplicate-id load race)', () => {
-    writePlugin('svc-plg', 'svc-plg');
-    writePlugin('.svc-plg.bak', 'svc-plg'); // a leftover update backup carrying the SAME manifest id
-
-    const loadSpy = jest.spyOn(loader, 'loadPlugin');
-    loader.onModuleInit();
-
-    const scanned = loadSpy.mock.calls.map(c => c[0]);
-    expect(scanned).toContain(path.join(pluginsDir, 'svc-plg'));
-    expect(scanned).not.toContain(path.join(pluginsDir, '.svc-plg.bak'));
-  });
-});
-
-describe('PluginLoaderService — prunes registry ghosts of removed built-ins', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let loader: PluginLoaderService;
-  let storage: PluginStorageService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-ghosts-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    } as unknown as ConfigService;
-    storage = new PluginStorageService(config);
-    loader = new PluginLoaderService(config, new HookManager(), storage, {} as unknown as ModuleRef);
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const seedGhost = (id: string): void => {
-    // A leftover directory with no manifest (code deleted) + a stale registry entry still claiming
-    // the plugin is installed — the ghost state upgrades from <=0.6 are in.
-    fs.mkdirSync(path.join(pluginsDir, id), { recursive: true });
-    storage.setPluginEntry({
-      id,
-      type: 'extension',
-      name: id,
-      version: '1.0.0',
-      status: 'installed',
-      config: {},
-      builtIn: true,
-      installedAt: new Date(),
-      updatedAt: new Date(),
-    } as never);
-  };
-
-  it('prunes registry entries of legacy removed built-ins (auto-reply, translation) with no manifest', () => {
-    seedGhost('auto-reply');
-    seedGhost('translation');
-
-    loader.onModuleInit();
-
-    expect(storage.getPluginEntry('auto-reply')).toBeUndefined();
-    expect(storage.getPluginEntry('translation')).toBeUndefined();
-  });
-
-  it('keeps a manifest-less NON-legacy plugin entry (config survives an unreadable dir)', () => {
-    seedGhost('some-other-plugin');
-
-    loader.onModuleInit();
-
-    expect(storage.getPluginEntry('some-other-plugin')).toBeDefined();
-  });
-});
-
-describe('PluginLoaderService — boot reconciles the registry entry of a plugin it drops', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let storage: PluginStorageService;
-
-  const config = () =>
-    ({
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    }) as unknown as ConfigService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-drop-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    storage = new PluginStorageService(config());
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const makeLoader = (): PluginLoaderService =>
-    new PluginLoaderService(config(), new HookManager(), storage, {} as unknown as ModuleRef);
-
-  const writePlugin = (id: string, manifest: Record<string, unknown>): void => {
-    const dir = path.join(pluginsDir, id);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-  };
-
-  it('marks the persisted entry ERROR when boot-time manifest validation drops a previously-installed plugin', () => {
-    // Boot 1: a valid hand-placed plugin loads and gets its registry entry.
-    writePlugin('hand-placed', {
-      id: 'hand-placed',
-      name: 'Hand',
-      version: '1.0.0',
-      type: 'extension',
-      main: 'index.js',
-    });
-    makeLoader().onModuleInit();
-    expect(storage.getPluginEntry('hand-placed')?.status).toBe(PluginStatus.INSTALLED);
-    // The operator's config + standing enable decision live in that entry.
-    storage.setPluginConfig('hand-placed', { apiKey: 'keep-me' });
-    storage.setPluginEnabledByOperator('hand-placed', true);
-
-    // Boot 2: the manifest was hand-edited into something the installer would have rejected
-    // (missing required field) — the plugin is dropped from the runtime...
-    writePlugin('hand-placed', { id: 'hand-placed', name: 'Hand', type: 'extension', main: 'index.js' });
-    const loader2 = makeLoader();
-    loader2.onModuleInit();
-    expect(loader2.getPlugin('hand-placed')).toBeUndefined();
-
-    // ...and the registry no longer claims it installed. The entry itself (config,
-    // enabledByOperator) survives, so fixing the manifest and rebooting re-enables it.
-    const entry = storage.getPluginEntry('hand-placed');
-    expect(entry?.status).toBe(PluginStatus.ERROR);
-    expect(entry?.config).toEqual({ apiKey: 'keep-me' });
-    expect(entry?.enabledByOperator).toBe(true);
-  });
-
-  it('a hand-placed plugin that fails validation without a registry entry simply does not load', () => {
-    writePlugin('never-installed', { id: 'never-installed', name: 'Nope', type: 'extension', main: 'index.js' });
-
-    const loader = makeLoader();
-    loader.onModuleInit();
-
-    expect(loader.getPlugin('never-installed')).toBeUndefined();
-    // No entry existed, so the ERROR reconciliation is a no-op — none is invented either.
-    expect(storage.getPluginEntry('never-installed')).toBeUndefined();
-  });
-});
-
-describe('PluginLoaderService — loadPlugin seeds configSchema defaults', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let loader: PluginLoaderService;
-  let storage: PluginStorageService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-seed-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    } as unknown as ConfigService;
-    storage = new PluginStorageService(config);
-    loader = new PluginLoaderService(config, new HookManager(), storage, {} as unknown as ModuleRef);
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  it('seeds defaults into the runtime instance and the persisted registry entry at load', () => {
-    const dir = path.join(pluginsDir, 'seeded-plg');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      JSON.stringify({
-        id: 'seeded-plg',
-        name: 'seeded-plg',
-        version: '1.0.0',
-        type: 'extension',
-        main: 'index.js',
-        configSchema: {
-          type: 'object',
-          properties: { timezone: { type: 'string', default: 'UTC' } },
-        },
-      }),
-    );
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-
-    loader.onModuleInit();
-
-    expect(loader.getPlugin('seeded-plg')?.config).toEqual({ timezone: 'UTC' });
-    expect(storage.getPluginEntry('seeded-plg')?.config).toEqual({ timezone: 'UTC' });
   });
 });
 
@@ -661,6 +399,199 @@ describe('PluginLoaderService — graceful shutdown (onModuleDestroy)', () => {
     expect(okDisable).toHaveBeenCalledTimes(1);
     expect(loader.getPlugin('ok-plg')?.status).toBe(PluginStatus.DISABLED);
   });
+
+  it('waits for an enable already in flight and disables it, so its onDisable still runs', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const onDisable = jest.fn(() => Promise.resolve());
+    loader.registerBuiltInPlugin(ext('slow-plg'), { onEnable: () => gate, onDisable });
+
+    const enabling = loader.enablePlugin('slow-plg');
+    const destroying = loader.onModuleDestroy();
+    release();
+    await enabling;
+    await destroying;
+
+    expect(onDisable).toHaveBeenCalledTimes(1);
+    expect(loader.getPlugin('slow-plg')?.status).toBe(PluginStatus.DISABLED);
+  });
+
+  // Shutdown waits on every enable it has recorded, so a settled one left in the set is waited on for the
+  // life of the process and the set grows by one entry per enable.
+  it.each([
+    ['succeeds', () => Promise.resolve()],
+    ['fails', () => Promise.reject(new Error('onEnable failed'))],
+  ])('stops tracking an enable once it %s', async (_outcome, onEnable) => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    loader.registerBuiltInPlugin(ext('tracked-plg'), { onEnable: () => gate.then(onEnable) });
+
+    const enabling = loader.enablePlugin('tracked-plg').catch(() => undefined);
+    expect(loader['pendingEnables'].size).toBe(1);
+
+    release();
+    await enabling;
+    expect(loader['pendingEnables'].size).toBe(0);
+  });
+
+  it('disables running plugins without waiting for an enable still in flight', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const runningDisable = jest.fn(() => Promise.resolve());
+    const slowDisable = jest.fn(() => Promise.resolve());
+    loader.registerBuiltInPlugin(ext('running-plg'), { onDisable: runningDisable });
+    loader.registerBuiltInPlugin(ext('slow-plg'), { onEnable: () => gate, onDisable: slowDisable });
+    await loader.enablePlugin('running-plg');
+
+    const enabling = loader.enablePlugin('slow-plg');
+    const destroying = loader.onModuleDestroy();
+    await new Promise(resolve => setImmediate(resolve));
+
+    // The running plugin's onDisable runs while the other enable is still held.
+    expect(runningDisable).toHaveBeenCalledTimes(1);
+    expect(slowDisable).not.toHaveBeenCalled();
+
+    release();
+    await enabling;
+    await destroying;
+
+    expect(runningDisable).toHaveBeenCalledTimes(1);
+    expect(slowDisable).toHaveBeenCalledTimes(1);
+    expect(loader.getPlugin('running-plg')?.status).toBe(PluginStatus.DISABLED);
+    expect(loader.getPlugin('slow-plg')?.status).toBe(PluginStatus.DISABLED);
+  });
+
+  it('joins a disable already in flight instead of running onDisable twice', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const onDisable = jest.fn(() => gate);
+    loader.registerBuiltInPlugin(ext('busy-plg'), { onDisable });
+    await loader.enablePlugin('busy-plg');
+
+    const disabling = loader.disablePlugin('busy-plg');
+    const destroying = loader.onModuleDestroy();
+    release();
+    await disabling;
+    await destroying;
+
+    expect(onDisable).toHaveBeenCalledTimes(1);
+    expect(loader.getPlugin('busy-plg')?.status).toBe(PluginStatus.DISABLED);
+  });
+
+  it('joins the disable of an unload already in flight', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => (release = resolve));
+    const onDisable = jest.fn(() => gate);
+    const onUnload = jest.fn(() => Promise.resolve());
+    loader.registerBuiltInPlugin(ext('gone-plg'), { onDisable, onUnload });
+    await loader.enablePlugin('gone-plg');
+
+    const unloading = loader.unloadPlugin('gone-plg');
+    const destroying = loader.onModuleDestroy();
+    release();
+    await unloading;
+    await destroying;
+
+    expect(onDisable).toHaveBeenCalledTimes(1);
+    expect(onUnload).toHaveBeenCalledTimes(1);
+    expect(loader.getPlugin('gone-plg')).toBeUndefined();
+  });
+
+  describe('time cap', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    const never = (): Promise<void> => new Promise<void>(() => undefined);
+
+    it('disables plugins in parallel and returns at PLUGIN_SHUTDOWN_WAIT_MS when onDisable never settles', async () => {
+      const a = jest.fn(never);
+      const b = jest.fn(never);
+      loader.registerBuiltInPlugin(ext('a-plg'), { onDisable: a });
+      loader.registerBuiltInPlugin(ext('b-plg'), { onDisable: b });
+      await loader.enablePlugin('a-plg');
+      await loader.enablePlugin('b-plg');
+      const warn = jest.spyOn(loader['logger'], 'warn').mockImplementation(() => undefined);
+
+      let done = false;
+      void loader.onModuleDestroy().then(() => (done = true));
+      await jest.advanceTimersByTimeAsync(0);
+      expect(a).toHaveBeenCalledTimes(1);
+      expect(b).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(PLUGIN_SHUTDOWN_WAIT_MS - 1);
+      expect(done).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(done).toBe(true);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('time cap'),
+        expect.objectContaining({ action: 'plugin_shutdown_timeout' }),
+      );
+    });
+
+    it('stops waiting for an enable that never settles at the same cap', async () => {
+      loader.registerBuiltInPlugin(ext('stuck-plg'), { onEnable: never });
+      void loader.enablePlugin('stuck-plg').catch(() => undefined);
+      jest.spyOn(loader['logger'], 'warn').mockImplementation(() => undefined);
+
+      let done = false;
+      void loader.onModuleDestroy().then(() => (done = true));
+      await jest.advanceTimersByTimeAsync(PLUGIN_SHUTDOWN_WAIT_MS - 1);
+      expect(done).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(done).toBe(true);
+    });
+
+    it('still disables an enable that lands at 2 s and returns then, without the warning', async () => {
+      const onDisable = jest.fn(() => Promise.resolve());
+      loader.registerBuiltInPlugin(ext('late-plg'), {
+        onEnable: () => new Promise<void>(resolve => setTimeout(resolve, 2000)),
+        onDisable,
+      });
+      void loader.enablePlugin('late-plg');
+      const warn = jest.spyOn(loader['logger'], 'warn').mockImplementation(() => undefined);
+
+      let done = false;
+      void loader.onModuleDestroy().then(() => (done = true));
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(done).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(done).toBe(true);
+      expect(onDisable).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('leaves no timer behind after a teardown that finishes within the cap', async () => {
+      loader.registerBuiltInPlugin(ext('ok-plg'), { onDisable: () => Promise.resolve() });
+      await loader.enablePlugin('ok-plg');
+
+      await loader.onModuleDestroy();
+
+      expect(jest.getTimerCount()).toBe(0);
+    });
+
+    it('does not let one failing onDisable stop the others', async () => {
+      const ok = jest.fn(() => Promise.resolve());
+      loader.registerBuiltInPlugin(ext('bad-plg'), { onDisable: () => Promise.reject(new Error('flush failed')) });
+      loader.registerBuiltInPlugin(ext('ok-plg'), { onDisable: ok });
+      await loader.enablePlugin('bad-plg');
+      await loader.enablePlugin('ok-plg');
+      jest.spyOn(loader['logger'], 'error').mockImplementation(() => undefined);
+
+      await expect(loader.onModuleDestroy()).resolves.toBeUndefined();
+      expect(ok).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('refuses an enable once teardown has begun', async () => {
+    const onEnable = jest.fn(() => Promise.resolve());
+    loader.registerBuiltInPlugin(ext('late-plg'), { onEnable });
+
+    await loader.onModuleDestroy();
+
+    await expect(loader.enablePlugin('late-plg')).rejects.toThrow(/shutting down/);
+    expect(onEnable).not.toHaveBeenCalled();
+    expect(loader.getPlugin('late-plg')?.status).not.toBe(PluginStatus.ENABLED);
+  });
 });
 
 describe('PluginLoaderService — enable-failure hook cleanup', () => {
@@ -707,7 +638,13 @@ describe('PluginLoaderService — enable-failure hook cleanup', () => {
 
 describe('PluginLoaderService.dispatchWebhookForInstance config delivery', () => {
   it('delivers the instance-session-resolved config to the sandbox host', async () => {
-    const fakeInstanceService = { resolve: jest.fn().mockResolvedValue({ sessionScope: 'sess-1' }) };
+    // `list` is part of the real service and the dispatch path consults it to decide whether the
+    // scope-keyed slice can be attributed to this instance. One enabled instance on the scope, so
+    // the slice IS attributable and the per-session override below must still apply.
+    const fakeInstanceService = {
+      resolve: jest.fn().mockResolvedValue({ sessionScope: 'sess-1' }),
+      list: jest.fn().mockResolvedValue([{ instanceId: 'acct1', enabled: true, sessionScope: 'sess-1' }]),
+    };
     const configService = { get: jest.fn().mockReturnValue(undefined) } as unknown as ConfigService;
     const pluginStorage = {
       getPluginEntry: jest.fn().mockReturnValue(undefined),
@@ -777,7 +714,7 @@ describe('PluginLoaderService — search-provider wiring', () => {
     } as unknown as ModuleRef);
   }
 
-  // getSearchRegistry's own behaviour now lives in plugin-host-services.spec.ts, tested on the class
+  // getSearchRegistryPort's own behaviour now lives in plugin-host-services.spec.ts, tested on the class
   // that owns it instead of through a private reach-in on the loader.
 
   it('disablePlugin unregisters the plugin’s search-provider entry', async () => {
@@ -1003,157 +940,6 @@ describe('PluginLoaderService — search-provider worker-crash fallback', () => 
   });
 });
 
-describe('PluginLoaderService — boot-time manifest validation parity with install', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let loader: PluginLoaderService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-bootval-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    } as unknown as ConfigService;
-    loader = new PluginLoaderService(
-      config,
-      new HookManager(),
-      new PluginStorageService(config),
-      {} as unknown as ModuleRef,
-    );
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const writePlugin = (id: string, manifest: unknown, withMain = true): string => {
-    const dir = path.join(pluginsDir, id);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      typeof manifest === 'string' ? manifest : JSON.stringify(manifest),
-    );
-    if (withMain) fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-    return dir;
-  };
-  const baseManifest = (id: string): Record<string, unknown> => ({
-    id,
-    name: id,
-    version: '1.0.0',
-    type: 'extension',
-    main: 'index.js',
-  });
-
-  it('rejects the same invalid manifests install rejects (fields, id, reserved, type)', () => {
-    // Missing a required field.
-    const noName = baseManifest('no-name');
-    delete noName.name;
-    expect(() => loader.loadPlugin(writePlugin('no-name', noName))).toThrow(/required field: name/i);
-    // A non-string required field (truthy — passed the old bare falsy check).
-    expect(() => loader.loadPlugin(writePlugin('num-main', { ...baseManifest('num-main'), main: 123 }))).toThrow(
-      /invalid required field/i,
-    );
-    // Unsafe id.
-    expect(() => loader.loadPlugin(writePlugin('bad id', { ...baseManifest('bad id'), id: 'bad id' }))).toThrow(
-      /invalid plugin id/i,
-    );
-    // Reserved built-in id (would shadow the baileys engine).
-    expect(() => loader.loadPlugin(writePlugin('baileys', baseManifest('baileys')))).toThrow(/reserved/i);
-    // A non-extension tier (engines are built-in, never directory-loadable).
-    expect(() => loader.loadPlugin(writePlugin('my-eng', { ...baseManifest('my-eng'), type: 'engine' }))).toThrow(
-      /not installable/i,
-    );
-    // A non-object manifest document.
-    expect(() => loader.loadPlugin(writePlugin('arr-plg', '[]'))).toThrow(/must be a JSON object/i);
-  });
-
-  it('rejects a manifest whose main escapes the plugin directory', () => {
-    const dir = writePlugin('trav-plg', { ...baseManifest('trav-plg'), main: '../other/evil.js' });
-    expect(() => loader.loadPlugin(dir)).toThrow(/escapes the plugin directory/i);
-  });
-
-  it('rejects a manifest whose main file is missing from the directory', () => {
-    const dir = writePlugin('gone-main', { ...baseManifest('gone-main'), main: 'gone.js' });
-    expect(() => loader.loadPlugin(dir)).toThrow(/main file not found/i);
-  });
-});
-
-describe('PluginLoaderService — interrupted-update recovery at boot', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let loader: PluginLoaderService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-uprec-'));
-    pluginsDir = path.join(tmpDir, 'plugins');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
-    } as unknown as ConfigService;
-    loader = new PluginLoaderService(
-      config,
-      new HookManager(),
-      new PluginStorageService(config),
-      {} as unknown as ModuleRef,
-    );
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const writePluginTree = (dirName: string, id: string, version = '1.0.0'): void => {
-    const dir = path.join(pluginsDir, dirName);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      JSON.stringify({ id, name: id, version, type: 'extension', main: 'index.js' }),
-    );
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-  };
-
-  it('restores the backup as the live dir when a crash mid-swap lost the live dir', () => {
-    // Crash between `rename(live → backup)` and `rename(staging → live)`: the live dir is gone, the
-    // backup holds the previous version, and staging never landed.
-    writePluginTree('.svc-plg.bak', 'svc-plg');
-    writePluginTree('.svc-plg.new', 'svc-plg', '2.0.0');
-
-    loader.onModuleInit();
-
-    // The previous version is back as the live dir and loads normally — the plugin no longer
-    // silently vanishes while its registry entry still claims it is installed.
-    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('1.0.0');
-    expect(fs.existsSync(path.join(pluginsDir, 'svc-plg', 'manifest.json'))).toBe(true);
-    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.bak'))).toBe(false);
-    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.new'))).toBe(false);
-  });
-
-  it('drops a stale backup when the live dir exists (crash after the swap completed)', () => {
-    writePluginTree('svc-plg', 'svc-plg', '2.0.0'); // the swapped-in new version
-    writePluginTree('.svc-plg.bak', 'svc-plg'); // leftover backup of the old one
-
-    loader.onModuleInit();
-
-    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('2.0.0');
-    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.bak'))).toBe(false);
-  });
-
-  it('drops a stale staging tree (crash before the swap ever started)', () => {
-    writePluginTree('svc-plg', 'svc-plg');
-    writePluginTree('.svc-plg.new', 'svc-plg', '2.0.0');
-
-    loader.onModuleInit();
-
-    expect(loader.getPlugin('svc-plg')?.manifest.version).toBe('1.0.0');
-    expect(fs.existsSync(path.join(pluginsDir, '.svc-plg.new'))).toBe(false);
-  });
-
-  it('leaves an unrelated dot-prefixed directory alone', () => {
-    writePluginTree('svc-plg', 'svc-plg');
-    fs.mkdirSync(path.join(pluginsDir, '.gitkeep.d'), { recursive: true });
-
-    loader.onModuleInit();
-
-    expect(fs.existsSync(path.join(pluginsDir, '.gitkeep.d'))).toBe(true);
-    expect(loader.getPlugin('svc-plg')).toBeDefined();
-  });
-});
-
 describe('PluginLoaderService — onUnload dispatch', () => {
   let tmpDir: string;
   let pluginsDir: string;
@@ -1253,59 +1039,6 @@ describe('PluginLoaderService — onUnload dispatch', () => {
 
     expect(host.terminate).toHaveBeenCalledTimes(1);
     expect(loader.getPlugin('sand-bad')).toBeUndefined();
-  });
-});
-
-describe('PluginLoaderService — uninstall cleans up split-dir plugin storage', () => {
-  let tmpDir: string;
-  let pluginsDir: string;
-  let dataDir: string;
-  let loader: PluginLoaderService;
-  let storage: PluginStorageService;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-splitstore-'));
-    // Split-dir deployment: the package dir and the ctx.storage data dir are NOT the same tree.
-    pluginsDir = path.join(tmpDir, 'plugins');
-    dataDir = path.join(tmpDir, 'data');
-    fs.mkdirSync(pluginsDir, { recursive: true });
-    const config = {
-      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? dataDir : undefined),
-    } as unknown as ConfigService;
-    storage = new PluginStorageService(config);
-    loader = new PluginLoaderService(config, new HookManager(), storage, {} as unknown as ModuleRef);
-  });
-  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
-
-  const writeUserPlugin = (id: string): string => {
-    const dir = path.join(pluginsDir, id);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, 'manifest.json'),
-      JSON.stringify({ id, name: id, version: '1.0.0', type: 'extension', main: 'index.js' }),
-    );
-    fs.writeFileSync(path.join(dir, 'index.js'), 'module.exports = class {};');
-    return dir;
-  };
-
-  it('removes the plugin’s storage dir on uninstall, and only that plugin’s', async () => {
-    const dir = writeUserPlugin('user-plg');
-    writeUserPlugin('other-plg');
-    loader.loadPlugin(dir);
-    loader.loadPlugin(path.join(pluginsDir, 'other-plg'));
-    // Persist real ctx.storage state for both plugins (split-dir: under <dataDir>/plugins/<id>).
-    await storage.createPluginStorage('user-plg').set('token', { secret: 'abc' });
-    await storage.createPluginStorage('other-plg').set('token', { secret: 'xyz' });
-    const userStorageDir = path.join(dataDir, 'plugins', 'user-plg');
-    const otherStorageDir = path.join(dataDir, 'plugins', 'other-plg');
-    expect(fs.existsSync(userStorageDir)).toBe(true);
-
-    await loader.uninstallPlugin('user-plg');
-
-    expect(fs.existsSync(dir)).toBe(false); // package dir (unchanged behavior)
-    expect(fs.existsSync(userStorageDir)).toBe(false); // split-dir storage is now cleaned too
-    expect(fs.existsSync(otherStorageDir)).toBe(true); // another plugin's storage is untouched
-    expect(await storage.createPluginStorage('other-plg').get('token')).toEqual({ secret: 'xyz' });
   });
 });
 

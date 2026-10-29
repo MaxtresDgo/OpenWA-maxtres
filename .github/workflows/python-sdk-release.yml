@@ -22,13 +22,15 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  # Everything that installs third-party code (pip, the test dependencies, the build backend that
+  # `python -m build` fetches) runs here, in a job that cannot mint a publish credential. Those
+  # packages resolve to whatever is newest at tag time, so they must never share a job with
+  # id-token: write. This is PyPA's documented layout for trusted publishing.
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-      # Mints the OIDC token PyPI exchanges for its short-lived upload credential. Without this the
-      # publish has no credential at all — it is the whole mechanism.
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -68,7 +70,7 @@ jobs:
           fi
           echo "Tag $REF_NAME matches pyproject.toml $PKG_VERSION"
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           # One interpreter, not the SDK CI matrix: the wheel is pure Python (py3-none-any) and carries
           # requires-python from the metadata, so the build interpreter does not shape the artifact.
@@ -81,6 +83,7 @@ jobs:
         working-directory: sdk/python
         run: |
           pip install -e '.[dev]'
+          mypy
           pytest
 
       - name: Build sdist + wheel
@@ -89,7 +92,30 @@ jobs:
           python -m pip install --upgrade build
           python -m build
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: python-sdk-dist
+          path: sdk/python/dist/
+          if-no-files-found: error
+
+  publish:
+    # Runs only after the guards, the tests and the build above all passed.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Mints the OIDC token PyPI exchanges for its short-lived upload credential. Without this the
+      # publish has no credential at all. No checkout and no install: this job only uploads the
+      # files the build job produced and tested.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: python-sdk-dist
+          path: sdk/python/dist/
+
       - name: Publish to PyPI (trusted publishing)
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: sdk/python/dist

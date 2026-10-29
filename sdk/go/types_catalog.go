@@ -2,13 +2,13 @@ package openwa
 
 import "net/url"
 
-// CatalogInfo describes a business catalog.
+// CatalogInfo describes a business catalog. ProductCount counts at most the first 51 products on Baileys.
 type CatalogInfo struct {
 	ID           string  `json:"id"`
 	Name         string  `json:"name"`
 	Description  *string `json:"description,omitempty"`
-	ProductCount int     `json:"productCount,omitempty"`
-	URL          string  `json:"url,omitempty"`
+	ProductCount int     `json:"productCount"`
+	URL          string  `json:"url"`
 }
 
 // CatalogProductsQuery paginates the catalog products list.
@@ -26,16 +26,18 @@ func (q *CatalogProductsQuery) values() url.Values {
 
 // CatalogProduct is a catalog product.
 type CatalogProduct struct {
-	ID             string  `json:"id"`
-	Name           string  `json:"name"`
-	Description    *string `json:"description,omitempty"`
-	Price          float64 `json:"price,omitempty"`
-	Currency       string  `json:"currency,omitempty"`
-	PriceFormatted string  `json:"priceFormatted,omitempty"`
-	ImageURL       *string `json:"imageUrl,omitempty"`
-	URL            string  `json:"url,omitempty"`
-	IsAvailable    bool    `json:"isAvailable,omitempty"`
-	RetailerID     string  `json:"retailerId,omitempty"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description,omitempty"`
+	// Price is nil when the product has no price (PriceFormatted is empty then too). A genuine
+	// price of 0 is a pointer to 0.
+	Price          *float64 `json:"price,omitempty"`
+	Currency       string   `json:"currency,omitempty"`
+	PriceFormatted string   `json:"priceFormatted,omitempty"`
+	ImageURL       *string  `json:"imageUrl,omitempty"`
+	URL            string   `json:"url"`
+	IsAvailable    bool     `json:"isAvailable"`
+	RetailerID     string   `json:"retailerId,omitempty"`
 }
 
 // ProductPagination is the pagination block for catalog products.
@@ -57,10 +59,4 @@ type SendProductRequest struct {
 	ChatID    string `json:"chatId"`
 	ProductID string `json:"productId"`
 	Body      string `json:"body,omitempty"`
-}
-
-// SendCatalogRequest sends a catalog link message.
-type SendCatalogRequest struct {
-	ChatID string `json:"chatId"`
-	Body   string `json:"body,omitempty"`
 }

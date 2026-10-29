@@ -23,15 +23,26 @@ export enum AuditAction {
   SESSION_FORCE_KILLED = 'session_force_killed',
   SESSION_LOGGED_OUT = 'session_logged_out',
   SESSION_DELETED = 'session_deleted',
+  SESSION_CONFIG_UPDATED = 'session_config_updated',
   SESSION_QR_GENERATED = 'session_qr_generated',
   SESSION_CONNECTED = 'session_connected',
   SESSION_DISCONNECTED = 'session_disconnected',
-  // WhatsApp's own judgement of the account, not our connection to it. Unlike the two above these
-  // ARE audited: they are rare, they are not reconnect noise, and the in-memory store that serves
+  // WhatsApp's own judgement of the account, not our connection to it. Unlike SESSION_CONNECTED (never
+  // emitted) and SESSION_DISCONNECTED (emitted only for a terminal unlink), these are always audited:
+  // they are rare, they are not reconnect noise, and the in-memory store that serves
   // them to the API does not survive a restart — so the audit log is the only durable record of when
   // an account was restricted and for how long.
   SESSION_RESTRICTED = 'session_restricted',
   SESSION_RESTRICTION_LIFTED = 'session_restriction_lifted',
+  // A ready link was refused because a different WhatsApp number scanned a session already bound to
+  // another. Rare, security-relevant, and the in-memory error store that serves the reason to the API
+  // does not survive a restart, so the audit row is the only durable record that a rebind was blocked.
+  SESSION_REBIND_REJECTED = 'session_rebind_rejected',
+  // A session reported a phone number under a second privacy id (lid) while the earlier lid still maps to
+  // it: the number changed hands or its holder moved lid, and a chat-restricted key naming either lid or
+  // the number reaches both. Pairs the table already held are not reported, unless a lid has left the
+  // gateway's mapping cache, which counts as new. Filed under the session that made the report.
+  PHONE_SECOND_LID_REPORTED = 'phone_second_lid_reported',
 
   // Message events
   MESSAGE_SENT = 'message_sent',
@@ -49,6 +60,7 @@ export enum AuditAction {
   WEBHOOK_DELETED = 'webhook_deleted',
   WEBHOOK_TRIGGERED = 'webhook_triggered',
   WEBHOOK_FAILED = 'webhook_failed',
+  WEBHOOK_DELIVERIES_REDRIVEN = 'webhook_deliveries_redriven',
 
   // Integration plugin-instance events
   INTEGRATION_INSTANCE_CREATED = 'integration_instance_created',
@@ -56,6 +68,15 @@ export enum AuditAction {
   INTEGRATION_INSTANCE_SECRET_REGENERATED = 'integration_instance_secret_regenerated',
   INTEGRATION_INSTANCE_DELETED = 'integration_instance_deleted',
   INTEGRATION_INSTANCE_REDRIVEN = 'integration_instance_redriven',
+
+  // Plugin management (ADMIN-only: a plugin is third-party code that runs in the gateway process).
+  PLUGIN_INSTALLED = 'plugin_installed',
+  PLUGIN_UPDATED = 'plugin_updated',
+  PLUGIN_UNINSTALLED = 'plugin_uninstalled',
+  PLUGIN_ENABLED = 'plugin_enabled',
+  PLUGIN_DISABLED = 'plugin_disabled',
+  PLUGIN_CONFIG_UPDATED = 'plugin_config_updated',
+  PLUGIN_SESSIONS_UPDATED = 'plugin_sessions_updated',
 
   // Infrastructure events (ADMIN-only operations on the infra module: credential-bearing config
   // mutation, server restart / Docker orchestration, and full-DB / storage export+import).

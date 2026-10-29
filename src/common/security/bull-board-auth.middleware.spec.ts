@@ -2,11 +2,15 @@ import { HttpException, UnauthorizedException, ForbiddenException } from '@nestj
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { BullBoardAuthMiddleware } from './bull-board-auth.middleware';
-import { AuthService } from '../../modules/auth/auth.service';
+import { AuthService, UnresolvedApiKeyException } from '../../modules/auth/auth.service';
 import { ApiKeyRole } from '../../modules/auth/entities/api-key.entity';
 import { AuditService } from '../../modules/audit/audit.service';
 import { AuditAction } from '../../modules/audit/entities/audit-log.entity';
 import { KeyRateLimiter } from '../../modules/mcp/mcp-rate-limit';
+import { allowUnauthenticatedAuditRow } from '../../modules/audit/auth-failure-audit-limiter';
+import * as fs from 'fs';
+import * as path from 'path';
+import { runWithRequestId, getRequestActor } from '../services/request-context';
 
 const res = {} as Response;
 
@@ -78,6 +82,27 @@ describe('BullBoardAuthMiddleware', () => {
     expect((forwarded as ForbiddenException).message).toContain('restricted');
   });
 
+  it('rejects an ADMIN key that is restricted to specific chats', async () => {
+    authService.validateApiKey.mockResolvedValue({
+      id: 'key-chat',
+      name: 'chat-scoped-admin',
+      role: ApiKeyRole.ADMIN,
+      allowedSessions: null,
+      allowedChats: ['123@g.us'],
+    });
+    authService.hasPermission.mockReturnValue(true);
+
+    const req = reqWith({ 'x-api-key': 'raw-key' });
+    const next = jest.fn();
+
+    await mw.use(req, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    const forwarded = (next.mock.calls as Array<Array<unknown>>)[0]?.[0];
+    expect(forwarded).toBeInstanceOf(ForbiddenException);
+    expect((forwarded as ForbiddenException).message).toContain('restricted to selected chats');
+  });
+
   it('admits an ADMIN key with an empty allowedSessions list', async () => {
     authService.validateApiKey.mockResolvedValue({
       id: 'key-2',
@@ -113,6 +138,14 @@ describe('BullBoardAuthMiddleware', () => {
     authService.hasPermission.mockReturnValue(true);
 
     await mw.use(reqWith({ authorization: 'Bearer abc' }), res, jest.fn());
+    expect(authService.validateApiKey).toHaveBeenCalledWith('abc', '127.0.0.1');
+  });
+
+  it('accepts the Bearer scheme in any case', async () => {
+    authService.validateApiKey.mockResolvedValue({ role: ApiKeyRole.ADMIN });
+    authService.hasPermission.mockReturnValue(true);
+
+    await mw.use(reqWith({ authorization: 'bearer abc' }), res, jest.fn());
     expect(authService.validateApiKey).toHaveBeenCalledWith('abc', '127.0.0.1');
   });
 
@@ -209,6 +242,23 @@ describe('BullBoardAuthMiddleware pre-auth IP throttle (mirrors MCP createIpThro
     await mw.use(reqFromIp('203.0.113.9', headers), res, otherNext);
     expect(otherNext).toHaveBeenCalledWith(); // allowed
     expect(authService.validateApiKey).toHaveBeenCalledWith('admin', '203.0.113.9');
+  });
+
+  it('buckets an IPv6 client on its /64 but validates the key against the full address', async () => {
+    const mw = adminMw(1);
+    const headers = { 'x-api-key': 'admin' };
+    const first = jest.fn();
+    await mw.use(reqFromIp('2001:db8:1:2::a', headers), res, first);
+    expect(first).toHaveBeenCalledWith();
+    expect(authService.validateApiKey).toHaveBeenCalledWith('admin', '2001:db8:1:2::a');
+
+    const sameSubnet = jest.fn();
+    await mw.use(reqFromIp('2001:db8:1:2::b', headers), res, sameSubnet);
+    expect((firstNextArg(sameSubnet) as HttpException).getStatus()).toBe(429);
+
+    const otherSubnet = jest.fn();
+    await mw.use(reqFromIp('2001:db8:1:3::a', headers), res, otherSubnet);
+    expect(otherSubnet).toHaveBeenCalledWith();
   });
 
   it('a missing key still consumes a throttle slot (pre-auth gate fires first)', async () => {
@@ -379,6 +429,70 @@ describe('BullBoardAuthMiddleware audit trail', () => {
     expect(auditService.logInfo).not.toHaveBeenCalled();
   });
 
+  // Unauthenticated rows are bounded per client IP, on a budget shared with the REST guard. These
+  // tests use IPs no other test in this file uses, since the budget is a module-level singleton.
+  it('writes at most 10 unauthenticated rows a minute for one IP, while every request still gets its 401', async () => {
+    const fromIp = (ip: string): Request =>
+      ({ ...reqFor('GET', {}, '/api/admin/queues/'), ip, socket: { remoteAddress: ip } }) as unknown as Request;
+    const next = jest.fn();
+    for (let i = 0; i < 50; i++) await mw.use(fromIp('198.51.100.81'), res, next);
+
+    expect(next).toHaveBeenCalledTimes(50);
+    for (const [err] of next.mock.calls as Array<[unknown]>) expect(err).toBeInstanceOf(UnauthorizedException);
+    expect(auditService.logWarn).toHaveBeenCalledTimes(10);
+
+    await mw.use(fromIp('198.51.100.82'), res, jest.fn());
+    expect(auditService.logWarn).toHaveBeenCalledTimes(11);
+    expect(auditService.logWarn).toHaveBeenLastCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({ ipAddress: '198.51.100.82' }),
+    );
+  });
+
+  it('shares the unauthenticated budget with the REST guard and still records a 403', async () => {
+    // Ten rows already written for this IP by the REST guard.
+    for (let i = 0; i < 10; i++) expect(allowUnauthenticatedAuditRow('198.51.100.83')).toBe(true);
+    const fromIp = (headers: Record<string, unknown>): Request =>
+      ({
+        ...reqFor('GET', headers, '/api/admin/queues/'),
+        ip: '198.51.100.83',
+        socket: { remoteAddress: '198.51.100.83' },
+      }) as unknown as Request;
+
+    await mw.use(fromIp({}), res, jest.fn());
+    expect(auditService.logWarn).not.toHaveBeenCalled();
+
+    authService.validateApiKey.mockResolvedValue({ role: ApiKeyRole.OPERATOR });
+    authService.hasPermission.mockReturnValue(false);
+    const next = jest.fn();
+    await mw.use(fromIp({ 'x-api-key': 'op' }), res, next);
+    expect(next).toHaveBeenCalledWith(expect.any(ForbiddenException));
+    expect(auditService.logWarn).toHaveBeenCalledTimes(1);
+  });
+
+  it('still records a rejected stored key from an IP whose budget is spent, but not an unknown one', async () => {
+    for (let i = 0; i < 10; i++) expect(allowUnauthenticatedAuditRow('198.51.100.84')).toBe(true);
+    const fromIp = (): Request =>
+      ({
+        ...reqFor('GET', { 'x-api-key': 'k' }, '/api/admin/queues/'),
+        ip: '198.51.100.84',
+        socket: { remoteAddress: '198.51.100.84' },
+      }) as unknown as Request;
+
+    authService.validateApiKey.mockRejectedValue(new UnresolvedApiKeyException('Invalid API key'));
+    await mw.use(fromIp(), res, jest.fn());
+    expect(auditService.logWarn).not.toHaveBeenCalled();
+
+    authService.validateApiKey.mockRejectedValue(new UnauthorizedException('API key is revoked'));
+    const next = jest.fn();
+    await mw.use(fromIp(), res, next);
+    expect(next).toHaveBeenCalledWith(expect.any(UnauthorizedException));
+    expect(auditService.logWarn).toHaveBeenCalledWith(
+      AuditAction.API_KEY_AUTH_FAILED,
+      expect.objectContaining({ ipAddress: '198.51.100.84', errorMessage: 'API key is revoked' }),
+    );
+  });
+
   it('degrades gracefully when no audit service is provided (rejections still work)', async () => {
     const noAuditMw = new BullBoardAuthMiddleware(
       authService as unknown as AuthService,
@@ -387,5 +501,68 @@ describe('BullBoardAuthMiddleware audit trail', () => {
     const next = jest.fn();
     await noAuditMw.use(reqFor('GET', {}, '/api/admin/queues/'), res, next);
     expect(next).toHaveBeenCalledWith(expect.any(UnauthorizedException));
+  });
+});
+
+/**
+ * The queue dashboard is the most privileged UI in the deployment, and its two post-authentication
+ * denials wrote an audit row with no credential on it — the same gap ApiKeyGuard had. The fix stamps
+ * the resolved actor before those checks, and it works only because requestContextMiddleware is
+ * installed ahead of this mount in main.ts. Both halves are pinned here: the stamp, and the ordering
+ * it silently depends on.
+ */
+describe('a queue-dashboard denial is attributable to the credential', () => {
+  const denialActor = async (apiKey: Record<string, unknown>, hasPermission: boolean) => {
+    const authService = {
+      validateApiKey: jest.fn().mockResolvedValue(apiKey),
+      hasPermission: jest.fn().mockReturnValue(hasPermission),
+    };
+    const mw = new BullBoardAuthMiddleware(
+      authService as unknown as AuthService,
+      { get: () => undefined } as unknown as ConfigService,
+    );
+    const req = {
+      headers: { 'x-api-key': 'k' },
+      query: {},
+      method: 'GET',
+      originalUrl: '/api/admin/queues',
+      ip: '203.0.113.44',
+      socket: { remoteAddress: '203.0.113.44' },
+    } as unknown as Request;
+    const next = jest.fn();
+    let actor: ReturnType<typeof getRequestActor>;
+    await runWithRequestId('req-1', async () => {
+      await mw.use(req, {} as Response, next);
+      actor = getRequestActor();
+    });
+    expect(next).toHaveBeenCalledWith(expect.any(ForbiddenException));
+    return actor;
+  };
+
+  it('stamps the key when the role is insufficient', async () => {
+    const actor = await denialActor({ id: 'key-1', name: 'Ops key', allowedSessions: [] }, false);
+    expect(actor).toMatchObject({ apiKeyId: 'key-1', apiKeyName: 'Ops key' });
+  });
+
+  it('stamps the key when a session-scoped key is refused', async () => {
+    const actor = await denialActor({ id: 'key-2', name: 'Tenant A', allowedSessions: ['s1'] }, true);
+    expect(actor).toMatchObject({ apiKeyId: 'key-2', apiKeyName: 'Tenant A' });
+  });
+
+  // The stamp is a no-op outside a request-context scope, so the mount order in main.ts is load
+  // bearing. Nothing else binds it; a reordering would silently return the null rows this fixed.
+  it('keeps requestContextMiddleware installed ahead of the queue-dashboard mount', () => {
+    // The guarantee now spans two files: configure-app.ts installs the middleware, and main.ts
+    // calls it before mounting the board. Reading only one of them would leave half the order
+    // unbound.
+    const read = (...parts: string[]): string => fs.readFileSync(path.join(__dirname, '..', '..', ...parts), 'utf8');
+    expect(read('configure-app.ts')).toContain('app.use(requestContextMiddleware)');
+
+    const main = read('main.ts');
+    const configureAt = main.indexOf('configureApp(app)');
+    const boardAt = main.indexOf('new BullBoardAuthMiddleware');
+    expect(configureAt).toBeGreaterThan(-1);
+    expect(boardAt).toBeGreaterThan(-1);
+    expect(configureAt).toBeLessThan(boardAt);
   });
 });

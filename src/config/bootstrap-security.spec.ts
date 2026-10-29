@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   resolveCorsPolicy,
   isSwaggerEnabled,
@@ -7,6 +9,9 @@ import {
   resolveBodyLimit,
   assertNoDefaultSecretsInProduction,
   isApiKeyPepperMissingInProduction,
+  isMainDbSynchronizeInProduction,
+  isNodeEnvUnset,
+  rewrittenCorsOrigins,
 } from './bootstrap-security';
 
 describe('resolveCorsPolicy', () => {
@@ -16,6 +21,32 @@ describe('resolveCorsPolicy', () => {
       allowAnyOrigin: true,
       credentials: false,
     });
+  });
+
+  // A browser sends `Origin: https://dashboard.example.com`, never a path or a trailing slash, so an entry
+  // copied from the address bar could not match until it is used as the origin it names.
+  it('uses an entry written with a path or a trailing slash as its origin', () => {
+    expect(
+      resolveCorsPolicy('https://dashboard.example.com/, http://localhost:3000/app, https://b.com', 'production'),
+    ).toEqual({
+      origins: ['https://dashboard.example.com', 'http://localhost:3000', 'https://b.com'],
+      allowAnyOrigin: false,
+      credentials: true,
+    });
+    expect(rewrittenCorsOrigins('https://dashboard.example.com/, http://localhost:3000/app, https://b.com')).toEqual([
+      'https://dashboard.example.com/',
+      'http://localhost:3000/app',
+    ]);
+    expect(rewrittenCorsOrigins(undefined)).toEqual([]);
+  });
+
+  it('keeps a wildcard and a value that is not an http(s) URL as written', () => {
+    expect(resolveCorsPolicy('*', 'development').origins).toEqual(['*']);
+    expect(resolveCorsPolicy('localhost:3000,not a url', 'production').origins).toEqual([
+      'localhost:3000',
+      'not a url',
+    ]);
+    expect(rewrittenCorsOrigins('*,localhost:3000,not a url')).toEqual([]);
   });
 
   it('honors an explicit allowlist and enables credentials (no wildcard)', () => {
@@ -147,6 +178,34 @@ describe('assertNoDefaultSecretsInProduction', () => {
     ).not.toThrow();
   });
 
+  // main.ts runs this guard BEFORE NestFactory.create, i.e. before ConfigModule validates NODE_ENV,
+  // so at this point the value is still arbitrary. Recognising only 'production' made every
+  // unrecognised value skip the guard entirely; it now recognises only the values that are
+  // deliberately NOT production and treats everything else as production.
+  it('treats an unrecognised NODE_ENV as production rather than skipping the guard', () => {
+    expect(() => assertNoDefaultSecretsInProduction({ nodeEnv: 'prod', allowDevApiKey: 'true' })).toThrow(
+      /ALLOW_DEV_API_KEY/,
+    );
+    expect(() =>
+      assertNoDefaultSecretsInProduction({ nodeEnv: 'staging', databaseType: 'postgres', databasePassword: 'openwa' }),
+    ).toThrow(/DATABASE_PASSWORD/);
+  });
+
+  // Boot validation treats a blank NODE_ENV as UNSET and lets it through, so this guard must agree:
+  // otherwise `NODE_ENV=` boots clean and then gets production-grade enforcement, and the two halves
+  // of the same rule disagree about the same string.
+  it('treats a blank NODE_ENV the way boot validation does — as unset', () => {
+    for (const nodeEnv of ['', '   ']) {
+      expect(() => assertNoDefaultSecretsInProduction({ nodeEnv, allowDevApiKey: 'true' })).not.toThrow();
+    }
+  });
+
+  it('still skips the guard for the two environments that are deliberately not production', () => {
+    for (const nodeEnv of ['development', 'test', undefined]) {
+      expect(() => assertNoDefaultSecretsInProduction({ nodeEnv, allowDevApiKey: 'true' })).not.toThrow();
+    }
+  });
+
   it('refuses prod with a default Postgres password', () => {
     expect(() =>
       assertNoDefaultSecretsInProduction({
@@ -163,7 +222,7 @@ describe('assertNoDefaultSecretsInProduction', () => {
     ).toThrow(/DATABASE_PASSWORD/);
   });
 
-  it('allows the built-in Postgres/MinIO default credentials in prod (internal-only network) (#488 review)', () => {
+  it('allows the built-in Postgres/MinIO default credentials in prod (internal-only network) (#488)', () => {
     // The bundled containers are reachable only on the internal Docker network (not published), so the
     // known 'openwa'/'minioadmin' creds the built-in flow provisions must not crash-loop a prod boot.
     expect(() =>
@@ -190,7 +249,7 @@ describe('assertNoDefaultSecretsInProduction', () => {
         s3SecretKey: 'minioadmin',
         minioBuiltIn: 'true',
       }),
-    ).toThrow(/S3_ACCESS_KEY, S3_SECRET_KEY/);
+    ).toThrow(/S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY/);
   });
 
   it('still refuses an EXTERNAL Postgres with a default password even when MinIO is built-in', () => {
@@ -225,7 +284,7 @@ describe('assertNoDefaultSecretsInProduction', () => {
         minioBuiltIn: 'true',
         s3Endpoint: 'https://s3.amazonaws.com',
       }),
-    ).toThrow(/S3_ACCESS_KEY/);
+    ).toThrow(/S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY/);
   });
 
   it('exempts the built-in defaults when the host is the internal bundled service', () => {
@@ -245,6 +304,74 @@ describe('assertNoDefaultSecretsInProduction', () => {
     ).not.toThrow();
   });
 
+  // The same aliases the rest of the app resolves to the bundled container: its network alias or its
+  // container name, in any letter case, with or without the trailing dot of an absolute DNS name.
+  it.each(['Postgres', 'postgres.', 'openwa-postgres', ' OPENWA-POSTGRES. '])(
+    'exempts the built-in Postgres default for the bundled host %s',
+    databaseHost => {
+      const env = {
+        nodeEnv: 'production',
+        databaseType: 'postgres',
+        databasePassword: 'openwa',
+        postgresBuiltIn: 'true',
+        databaseHost,
+      };
+      expect(() => assertNoDefaultSecretsInProduction(env)).not.toThrow();
+      expect(() => assertNoDefaultSecretsInProduction({ ...env, postgresBuiltIn: 'false' })).toThrow(
+        /DATABASE_PASSWORD/,
+      );
+    },
+  );
+
+  it.each(['http://minio.:9000', 'http://openwa-minio:9000', 'https://OPENWA-MINIO.:9000'])(
+    'exempts the built-in MinIO defaults for the bundled endpoint %s',
+    s3Endpoint => {
+      const env = {
+        nodeEnv: 'production',
+        storageType: 's3',
+        s3AccessKey: 'minioadmin',
+        s3SecretKey: 'minioadmin',
+        minioBuiltIn: 'true',
+        s3Endpoint,
+      };
+      expect(() => assertNoDefaultSecretsInProduction(env)).not.toThrow();
+      expect(() => assertNoDefaultSecretsInProduction({ ...env, minioBuiltIn: 'false' })).toThrow(
+        /S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY/,
+      );
+    },
+  );
+
+  it.each(['postgres.example.invalid', 'evil-postgres', 'openwa-postgres-evil'])(
+    'still refuses the default Postgres password for the external host %s',
+    databaseHost => {
+      expect(() =>
+        assertNoDefaultSecretsInProduction({
+          nodeEnv: 'production',
+          databaseType: 'postgres',
+          databasePassword: 'openwa',
+          postgresBuiltIn: 'true',
+          databaseHost,
+        }),
+      ).toThrow(/DATABASE_PASSWORD/);
+    },
+  );
+
+  it.each(['http://minio.example.invalid:9000', 'http://evil-minio:9000', 'http://openwa-minio-evil:9000'])(
+    'still refuses the default S3 credentials for the external endpoint %s',
+    s3Endpoint => {
+      expect(() =>
+        assertNoDefaultSecretsInProduction({
+          nodeEnv: 'production',
+          storageType: 's3',
+          s3AccessKey: 'minioadmin',
+          s3SecretKey: 'minioadmin',
+          minioBuiltIn: 'true',
+          s3Endpoint,
+        }),
+      ).toThrow(/S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY/);
+    },
+  );
+
   it('refuses prod with default MinIO/S3 credentials', () => {
     expect(() =>
       assertNoDefaultSecretsInProduction({
@@ -253,7 +380,7 @@ describe('assertNoDefaultSecretsInProduction', () => {
         s3AccessKey: 'minioadmin',
         s3SecretKey: 'minioadmin',
       }),
-    ).toThrow(/S3_ACCESS_KEY, S3_SECRET_KEY/);
+    ).toThrow(/S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY/);
   });
 
   it('refuses prod with a placeholder API_MASTER_KEY', () => {
@@ -272,6 +399,39 @@ describe('assertNoDefaultSecretsInProduction', () => {
     expect(() => assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: 'dev-admin-key' })).toThrow(
       /API_MASTER_KEY/,
     );
+  });
+
+  it('refuses prod with an API_MASTER_KEY below the 32-character floor, however unique it looks', () => {
+    expect(() =>
+      assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: 'short-but-unique' }),
+    ).toThrow(/API_MASTER_KEY/);
+    // One character under the floor still fails; the floor itself passes.
+    expect(() => assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: 'k'.repeat(31) })).toThrow(
+      /API_MASTER_KEY \(below the 32-character minimum\)/,
+    );
+    expect(() =>
+      assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: 'k'.repeat(32) }),
+    ).not.toThrow();
+  });
+
+  it('measures the master key trimmed — surrounding whitespace is not key material', () => {
+    // validateApiKey trims before hashing, so a padded 31-char key authenticates as 31 chars.
+    expect(() =>
+      assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: ` ${'k'.repeat(31)} ` }),
+    ).toThrow(/API_MASTER_KEY/);
+  });
+
+  it('does not length-check API_MASTER_KEY outside production (dev keeps its short keys)', () => {
+    for (const nodeEnv of ['development', 'test', undefined]) {
+      expect(() => assertNoDefaultSecretsInProduction({ nodeEnv, apiMasterKey: 'short' })).not.toThrow();
+    }
+  });
+
+  it('allows prod with a strong generated-shape API_MASTER_KEY', () => {
+    // The shape the first-boot generator emits: `owa_k1_` + 32 bytes hex (71 chars).
+    expect(() =>
+      assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: `owa_k1_${'ab'.repeat(32)}` }),
+    ).not.toThrow();
   });
 
   it('allows ALLOW_DEV_API_KEY=true outside production (the dev opt-in still works)', () => {
@@ -293,6 +453,30 @@ describe('assertNoDefaultSecretsInProduction', () => {
     expect(() =>
       assertNoDefaultSecretsInProduction({ nodeEnv: 'production', redisPassword: 'a-strong-unique-redis-secret' }),
     ).not.toThrow();
+  });
+
+  // The scrape endpoint is public and this token is its only credential, so the value .env.example ships
+  // (a copy-paste away from production) and the known weak values must not boot. There is no length floor:
+  // a short token that is not a known default keeps booting.
+  it('refuses the METRICS_TOKEN that .env.example ships, and known weak values, in production', () => {
+    const example = readFileSync(join(__dirname, '..', '..', '.env.example'), 'utf8');
+    const shipped = /^#?\s*METRICS_TOKEN=(.+)$/m.exec(example)?.[1];
+    expect(shipped).toBeTruthy();
+    for (const metricsToken of [shipped, ` ${shipped?.toUpperCase()} `, 'change-me', 'test', 'Secret']) {
+      expect(() => assertNoDefaultSecretsInProduction({ nodeEnv: 'production', metricsToken })).toThrow(
+        /METRICS_TOKEN/,
+      );
+    }
+  });
+
+  it('allows an unset, blank or non-default METRICS_TOKEN in production, and checks none outside it', () => {
+    // Unset or blank leaves the endpoint disabled, so there is no credential to be weak.
+    for (const metricsToken of [undefined, '', '   ', 'prom-scrape', 'k'.repeat(40)]) {
+      expect(() => assertNoDefaultSecretsInProduction({ nodeEnv: 'production', metricsToken })).not.toThrow();
+    }
+    for (const nodeEnv of ['development', 'test', undefined]) {
+      expect(() => assertNoDefaultSecretsInProduction({ nodeEnv, metricsToken: 'test' })).not.toThrow();
+    }
   });
 
   it('allows the default sqlite + local-storage prod setup (no secrets needed)', () => {
@@ -349,8 +533,22 @@ describe('assertNoDefaultSecretsInProduction', () => {
       }),
     ).not.toThrow();
     expect(() =>
-      assertNoDefaultSecretsInProduction({ nodeEnv: 'production', apiMasterKey: 'root-pw-8821x' }),
+      assertNoDefaultSecretsInProduction({
+        nodeEnv: 'production',
+        apiMasterKey: 'root-pw-8821x-and-the-rest-of-entropy',
+      }),
     ).not.toThrow();
+  });
+});
+
+describe('isMainDbSynchronizeInProduction', () => {
+  it('is true only for an explicit MAIN_DATABASE_SYNCHRONIZE=true in production', () => {
+    expect(isMainDbSynchronizeInProduction('production', 'true')).toBe(true);
+    expect(isMainDbSynchronizeInProduction('production', 'false')).toBe(false);
+    expect(isMainDbSynchronizeInProduction('production', undefined)).toBe(false);
+    expect(isMainDbSynchronizeInProduction('production', '')).toBe(false);
+    expect(isMainDbSynchronizeInProduction('test', 'true')).toBe(false);
+    expect(isMainDbSynchronizeInProduction(undefined, 'true')).toBe(false);
   });
 });
 
@@ -368,5 +566,19 @@ describe('isApiKeyPepperMissingInProduction', () => {
   it('is false outside production regardless of pepper (no dev warning noise)', () => {
     expect(isApiKeyPepperMissingInProduction('development', undefined)).toBe(false);
     expect(isApiKeyPepperMissingInProduction(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('isNodeEnvUnset', () => {
+  it('is true when NODE_ENV is unset or blank (incl. whitespace-only)', () => {
+    expect(isNodeEnvUnset(undefined)).toBe(true);
+    expect(isNodeEnvUnset('')).toBe(true);
+    expect(isNodeEnvUnset('   ')).toBe(true);
+  });
+
+  it('is false for any set value, including an unrecognised one (no warning noise)', () => {
+    expect(isNodeEnvUnset('development')).toBe(false);
+    expect(isNodeEnvUnset('production')).toBe(false);
+    expect(isNodeEnvUnset('staging')).toBe(false);
   });
 });

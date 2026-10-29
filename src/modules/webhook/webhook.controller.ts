@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Put, Delete, Param, Body, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from '@nestjs/swagger';
 import { WebhookService } from './webhook.service';
-import { CreateWebhookDto, UpdateWebhookDto, WebhookResponseDto } from './dto';
+import { CreateWebhookDto, UpdateWebhookDto, WebhookResponseDto, WebhookTestResponseDto } from './dto';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
 
@@ -19,6 +19,12 @@ export class WebhookController {
     description: 'Webhook created',
     type: WebhookResponseDto,
   })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid body, the URL embeds credentials or is blocked by the SSRF policy, or the per-session webhook limit is reached',
+  })
+  @ApiResponse({ status: 404, description: 'Session not found' })
   async create(@Param('sessionId') sessionId: string, @Body() dto: CreateWebhookDto): Promise<WebhookResponseDto> {
     return WebhookResponseDto.fromEntity(await this.webhookService.create(sessionId, dto));
   }
@@ -61,6 +67,10 @@ export class WebhookController {
     description: 'Webhook updated',
     type: WebhookResponseDto,
   })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid body, or a changed URL embeds credentials or is blocked by the SSRF policy',
+  })
   @ApiResponse({ status: 404, description: 'Webhook not found' })
   async update(
     @Param('sessionId') sessionId: string,
@@ -76,7 +86,7 @@ export class WebhookController {
   @ApiOperation({ summary: 'Test a webhook by sending a test payload' })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'id', description: 'Webhook ID' })
-  @ApiResponse({ status: 200, description: 'Test result' })
+  @ApiResponse({ status: 200, description: 'Test result', type: WebhookTestResponseDto })
   @ApiResponse({ status: 404, description: 'Webhook not found' })
   async test(
     @Param('sessionId') sessionId: string,

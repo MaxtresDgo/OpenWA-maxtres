@@ -12,6 +12,7 @@ import com.rmyndharis.openwa.model.SetGroupPictureRequest;
 import com.rmyndharis.openwa.model.CreateGroupRequest;
 import com.rmyndharis.openwa.model.GroupSettings;
 import com.rmyndharis.openwa.model.ListGroupsQuery;
+import com.rmyndharis.openwa.model.MembershipRequestActionRequest;
 import com.rmyndharis.openwa.support.MockTransport;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -110,6 +111,15 @@ class GroupsResourceTest {
     }
 
     @Test
+    void setMemberLabelSendsBody() {
+        tx.respond(200, "{\"success\":true}");
+        client.groups.setMemberLabel("s", "g@g.us", "Site A");
+        assertEquals("http://h/api/sessions/s/groups/g@g.us/member-label", tx.lastRequest().url());
+        assertEquals(HttpMethod.PUT, tx.lastRequest().method());
+        assertTrue(tx.lastRequest().body().contains("\"label\":\"Site A\""));
+    }
+
+    @Test
     void joinGroupHitsJoinPath() {
         tx.respond(200, "{\"success\":true,\"groupId\":\"g@g.us\"}");
         client.groups.joinGroup("s", "AbCdEfGhIjKl");
@@ -205,4 +215,24 @@ class GroupsResourceTest {
         client.groups.deletePicture("s", "120363@g.us");
         assertEquals(HttpMethod.DELETE, tx.lastRequest().method());
     }
+
+    @Test
+    void membershipRequestsListApproveReject() {
+        tx.respond(200, "[{\"participantId\":\"a@c.us\",\"method\":\"invite_link\"}]");
+        var pending = client.groups.getMembershipRequests("s", "g1@g.us");
+        assertEquals(HttpMethod.GET, tx.lastRequest().method());
+        assertTrue(tx.lastRequest().url().endsWith("/groups/g1@g.us/membership-requests"));
+        assertEquals("a@c.us", pending.get(0).participantId());
+
+        tx.respond(200, "{\"success\":true,\"message\":\"ok\",\"results\":[]}");
+        client.groups.approveMembershipRequests(
+            "s", "g1@g.us", MembershipRequestActionRequest.builder().participants(List.of("a@c.us")).build());
+        assertTrue(tx.lastRequest().url().endsWith("/membership-requests/approve"));
+        assertTrue(tx.lastRequest().body().contains("a@c.us"));
+
+        tx.respond(200, "{\"success\":true,\"message\":\"ok\",\"results\":[]}");
+        client.groups.rejectMembershipRequests("s", "g1@g.us", MembershipRequestActionRequest.builder().build());
+        assertTrue(tx.lastRequest().url().endsWith("/membership-requests/reject"));
+    }
+
 }

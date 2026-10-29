@@ -22,6 +22,17 @@ export class EngineRegistry {
   private readonly engines = new Map<string, IWhatsAppEngine>();
 
   /**
+   * The egress proxy each live engine was created with, by session (DB) id.
+   *
+   * A session's proxy is fixed for the life of its engine: the WebSocket, the browser and the fetch
+   * dispatcher are all built from it at start, and `PATCH /proxy` deliberately does not restart the
+   * engine, so the stored row can already name a different one. Anything that fetches ON BEHALF of a
+   * running session (a caller-supplied media URL) has to leave through THIS value, not the row, or
+   * the destination would see an address the rest of the session never uses.
+   */
+  private readonly proxies = new Map<string, string | undefined>();
+
+  /**
    * Sessions whose engine is being constructed but is not in `engines` yet. Held so concurrency
    * accounting and the infra import pre-flight can see a session that is starting but not yet
    * registered, which would otherwise look idle and be orphaned or double-started.
@@ -32,14 +43,25 @@ export class EngineRegistry {
    */
   readonly initializing = new Set<string>();
 
+  private readonly retireListeners: Array<(id: string, engine: IWhatsAppEngine) => void> = [];
+
   // ── Map-compatible surface (used by the lifecycle owner) ──────────────
 
   get(id: string): IWhatsAppEngine | undefined {
     return this.engines.get(id);
   }
 
-  set(id: string, engine: IWhatsAppEngine): void {
+  /**
+   * Register the live engine for a session together with the proxy it was started with. A new
+   * production call site must pass that proxy: `proxyUrl(id)` is what keeps a fetch made for a
+   * proxied session off the gateway's own address (#1626), and an omitted argument records "direct".
+   * It stays optional only because the specs that register a bare engine stub do not care.
+   */
+  set(id: string, engine: IWhatsAppEngine, proxyUrl?: string): void {
+    const previous = this.engines.get(id);
     this.engines.set(id, engine);
+    this.proxies.set(id, proxyUrl);
+    if (previous && previous !== engine) this.retired(id, previous);
   }
 
   has(id: string): boolean {
@@ -47,11 +69,30 @@ export class EngineRegistry {
   }
 
   delete(id: string): boolean {
-    return this.engines.delete(id);
+    const previous = this.engines.get(id);
+    this.proxies.delete(id);
+    const deleted = this.engines.delete(id);
+    if (previous) this.retired(id, previous);
+    return deleted;
   }
 
   clear(): void {
+    const previous = this.entries();
     this.engines.clear();
+    this.proxies.clear();
+    for (const [id, engine] of previous) this.retired(id, engine);
+  }
+
+  /**
+   * Run `listener` each time an engine stops being the live one for its session (replaced, deleted,
+   * or cleared at shutdown), after the map changed, so `isLive` already reports it stale.
+   */
+  onRetire(listener: (id: string, engine: IWhatsAppEngine) => void): void {
+    this.retireListeners.push(listener);
+  }
+
+  private retired(id: string, engine: IWhatsAppEngine): void {
+    for (const listener of this.retireListeners) listener(id, engine);
   }
 
   get size(): number {
@@ -94,7 +135,16 @@ export class EngineRegistry {
     if (!this.isLive(id, engine)) {
       return false;
     }
-    return this.engines.delete(id);
+    return this.delete(id);
+  }
+
+  /**
+   * The egress proxy the live engine for `id` was started with, or undefined when that session is
+   * direct OR has no live engine. A caller that must not fetch direct for a proxied session pairs
+   * this with the stored row; see `MediaConversionService.sessionProxy`.
+   */
+  proxyUrl(id: string): string | undefined {
+    return this.proxies.get(id);
   }
 
   // ── Consumer-facing accessor ──────────────────────────────────────────

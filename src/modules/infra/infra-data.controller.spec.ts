@@ -1,11 +1,8 @@
-// StorageService (imported transitively by the infra controllers) pulls in `archiver`
-// v8, which is ESM-only and cannot be parsed by ts-jest. The controller logic
-// under test never touches archiver, so a lightweight stub is sufficient.
-jest.mock('archiver', () => ({ default: jest.fn() }));
-
 // saveConfig writes the generated env via fs.writeFileSync and reads the existing file
 // via fs.existsSync/readFileSync; mock those so tests assert produced content without
-// touching the filesystem. existsSync defaults to false (no prior config).
+// touching the filesystem. existsSync defaults to false (no prior config) — except for
+// .node probes, which better-sqlite3's binding loader uses to locate its prebuilt binary;
+// a blanket false would send it after a node-gyp build that isn't there.
 jest.mock('fs', () => {
   const actual = jest.requireActual<typeof import('fs')>('fs');
   return {
@@ -14,15 +11,17 @@ jest.mock('fs', () => {
     // saveConfig now writes the generated env via writeSecretFile, which chmods 0600 — mock it
     // so the secret-hygiene path never touches the real filesystem.
     chmodSync: jest.fn(),
-    existsSync: jest.fn().mockReturnValue(false),
+    existsSync: jest.fn((p: unknown) => (typeof p === 'string' && p.endsWith('.node') ? actual.existsSync(p) : false)),
     readFileSync: jest.fn().mockReturnValue(''),
     createReadStream: jest.fn(() => jest.requireActual<typeof import('stream')>('stream').Readable.from([])),
   };
 });
 
-import { DataSource, QueryFailedError } from 'typeorm';
+import { DataSource, IsNull, QueryFailedError } from 'typeorm';
 import { ConflictException } from '@nestjs/common';
-import { InfraDataController, restoreSessionOwnership } from './infra-data.controller';
+import { InfraDataController } from './infra-data.controller';
+import { InfraDataService, restoreSessionOwnership, toSqliteDatetime } from './infra-data.service';
+import { EXPORT_TABLES } from './export-tables';
 import { Session, SessionStatus } from '../session/entities/session.entity';
 import { Webhook } from '../webhook/entities/webhook.entity';
 import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
@@ -30,14 +29,22 @@ import { MessageBatch, BatchStatus } from '../message/entities/message-batch.ent
 import { Template } from '../template/entities/template.entity';
 import { BaileysStoredMessage } from '../../engine/adapters/baileys-stored-message.entity';
 import { LidMapping } from '../../engine/identity/lid-mapping.entity';
+import { ChatState } from '../../engine/adapters/baileys-chat-state.entity';
 import { PluginInstance } from '../integration/entities/plugin-instance.entity';
 import { ConversationMapping } from '../integration/entities/conversation-mapping.entity';
 import { IngressEvent } from '../integration/entities/ingress-event.entity';
 import { WebhookDeliveryFailure } from '../webhook/entities/webhook-delivery-failure.entity';
+import { WebhookOutboxEvent } from '../webhook/entities/webhook-outbox-event.entity';
+import { WebhookOutboxService } from '../webhook/webhook-outbox.service';
 import { IntegrationDeliveryFailure } from '../integration/entities/integration-delivery-failure.entity';
 import { StatusUpdate } from '../status-store/entities/status-update.entity';
+import { SendIdempotencyKey } from '../message/entities/send-idempotency-key.entity';
 import { AutomationRule } from '../automation/entities/automation-rule.entity';
 import { AuditAction } from '../audit/entities/audit-log.entity';
+import { ScopeBindingService } from '../integration/scope-binding.service';
+import { PluginInstanceService } from '../integration/plugin-instance.service';
+import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
+import { BadRequestException } from '@nestjs/common';
 
 describe('InfraDataController.importData round-trips export-data (no silent message/batch loss)', () => {
   let ds: DataSource;
@@ -45,7 +52,13 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
   // exportData only reads dataDatabase.type off the config; everything else is unused here.
   const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
 
-  const newController = () => new InfraDataController(cfg as never, ds);
+  // The full data-connection entity set: exportData validates its table registry against the
+  // DataSource's entity metadata before reading anything, so a partial entity list would fail the
+  // export as registry drift rather than exercise the round-trip.
+  const newController = (ownership?: unknown) =>
+    new InfraDataController(
+      new InfraDataService(cfg as never, ds, undefined, undefined, undefined, ownership as never),
+    );
 
   beforeEach(async () => {
     ds = new DataSource({
@@ -56,11 +69,19 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
         Webhook,
         Message,
         MessageBatch,
+        Template,
+        BaileysStoredMessage,
+        LidMapping,
+        ChatState,
         PluginInstance,
         ConversationMapping,
         IngressEvent,
         WebhookDeliveryFailure,
+        WebhookOutboxEvent,
         IntegrationDeliveryFailure,
+        StatusUpdate,
+        AutomationRule,
+        SendIdempotencyKey,
       ],
       synchronize: true,
     });
@@ -122,12 +143,59 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     expect(new Date(restored.leaseExpiresAt as unknown as string).toISOString()).toBe(leaseExpiresAt.toISOString());
   });
 
+  it('keeps a stopped session stopped across an export and import', async () => {
+    await seedSession('s1');
+    await seedSession('s2');
+    await ds.getRepository(Session).update({ id: 's1' }, { desiredState: 'stopped' });
+
+    const dump = await controller.exportData();
+    const res = await controller.importData({ tables: dump.tables });
+    expect(res.warnings).toEqual([]);
+
+    expect((await ds.getRepository(Session).findOneByOrFail({ id: 's1' })).desiredState).toBe('stopped');
+    expect((await ds.getRepository(Session).findOneByOrFail({ id: 's2' })).desiredState).toBeNull();
+  });
+
+  it('drops the send idempotency claims of a session the restore removes and keeps those of one it restores', async () => {
+    await seedSession('s1');
+    await seedSession('s2');
+    const claims = ds.getRepository(SendIdempotencyKey);
+    for (const sessionId of ['s1', 's2']) {
+      await claims.save(
+        claims.create({
+          sessionId,
+          idempotencyKey: 'order-42',
+          route: 'send-text',
+          requestHash: 'h',
+          state: 'completed',
+          responseBody: { messageId: `sent-by-${sessionId}` },
+          expiresAt: new Date(Date.now() + 3_600_000),
+        }),
+      );
+    }
+    const both = await controller.exportData();
+    const onlyS2 = {
+      tables: {
+        ...both.tables,
+        sessions: (both.tables.sessions as unknown as Array<{ id: string }>).filter(row => row.id === 's2'),
+      },
+    };
+
+    expect(await controller.importData(onlyS2 as never)).toMatchObject({ imported: true });
+    expect((await claims.find()).map(claim => claim.sessionId)).toEqual(['s2']);
+
+    // A later restore that brings s1 back must not answer a retried send with the old stored response.
+    expect(await controller.importData({ tables: both.tables })).toMatchObject({ imported: true });
+    expect(await claims.findOneBy({ sessionId: 's1' })).toBeNull();
+    expect(await claims.findOneBy({ sessionId: 's2' })).not.toBeNull();
+  });
+
   it('carries LIVE claims forward by their remaining time, including a peer node’s', async () => {
     await seedSession('s1');
     await seedSession('s2');
     const dump = await controller.exportData();
 
-    // Seeded AFTER the export on purpose: the sessions importer writes 12 columns and none of them is
+    // Seeded AFTER the export on purpose: the sessions importer writes 13 columns and none of them is
     // ownership, so the dump cannot carry these values — and stamping them here keeps the assertion
     // margin free of the export's cost. That margin is consumed by the import preamble and the
     // commit, NOT by the stall below: a late timer moves the committed lease and `Date.now()` by the
@@ -171,7 +239,14 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
       runner.query = (async (...args: unknown[]): Promise<unknown> => {
         if (!stalled && typeof args[0] === 'string' && args[0].startsWith('DELETE FROM sessions')) {
           stalled = true;
-          await new Promise(resolve => setTimeout(resolve, remainingMs * 1.5));
+          // Wait until the original lease has genuinely expired, polling the clock instead of
+          // sleeping a fixed multiple of the TTL: the property under test is "the transaction
+          // outlived the remaining time", so wait for exactly that — no shorter (the lease would
+          // still be live) and no longer (extra sleep only eats the assertion margin below).
+          const expiredAt = readAt + remainingMs;
+          while (Date.now() < expiredAt) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
         }
         return realQuery(...args);
       }) as typeof runner.query;
@@ -213,6 +288,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
           events.push('release');
         };
       },
+      claimableWhere: () => [],
       heldByOtherNodes: () => Promise.resolve([]),
     };
     // Observe from inside the transaction: the token must already be held by the time rows move.
@@ -227,14 +303,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
       return runner;
     });
 
-    const withOwnership = new InfraDataController(
-      cfg as never,
-      ds,
-      undefined,
-      undefined,
-      undefined,
-      ownership as never,
-    );
+    const withOwnership = newController(ownership);
     const res = await withOwnership.importData({ tables: dump.tables });
     jest.restoreAllMocks();
 
@@ -317,6 +386,59 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     await expect(controller.importData({ tables: dump.tables })).resolves.toMatchObject({ imported: true });
   });
 
+  // On better-sqlite3 an export's reads share the import's connection, so they would see its
+  // uncommitted, possibly rolled-back tables and archive a state that is neither the old nor the new DB.
+  it('refuses an export while an import is running', async () => {
+    await seedSession('s1');
+    const dump = await controller.exportData();
+
+    const importing = controller.importData({ tables: dump.tables });
+    const refusal = await controller.exportData().catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ConflictException);
+    expect((refusal as ConflictException).getResponse()).toMatchObject({ code: 'IMPORT_ALREADY_RUNNING' });
+    await expect(importing).resolves.toMatchObject({ imported: true });
+    await expect(controller.exportData()).resolves.toMatchObject({ counts: { sessions: 1 } });
+  });
+
+  it('refuses an import while an export is running', async () => {
+    await seedSession('s1');
+    const dump = await controller.exportData();
+
+    const exporting = controller.exportData();
+    const refusal = await controller.importData({ tables: dump.tables }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ConflictException);
+    expect((refusal as ConflictException).getResponse()).toMatchObject({ code: 'EXPORT_IN_PROGRESS' });
+    await expect(exporting).resolves.toMatchObject({ counts: { sessions: 1 } });
+    await expect(controller.importData({ tables: dump.tables })).resolves.toMatchObject({ imported: true });
+  });
+
+  it('leaves out child rows of a session created after the sessions table was read', async () => {
+    await seedSession('s1');
+    await ds
+      .getRepository(Template)
+      .save(ds.getRepository(Template).create({ id: 't1', sessionId: 's1', name: 'greet', body: 'Hi' }));
+    // The export reads each table separately, so a session paired mid-export is missing from the
+    // archive while a child row written for it before its table is read is not.
+    const query = ds.query.bind(ds);
+    jest.spyOn(ds, 'query').mockImplementation(async (...args: Parameters<DataSource['query']>) => {
+      const rows: unknown = await query(...args);
+      if (args[0] === 'SELECT * FROM sessions') {
+        await seedSession('s2');
+        await ds
+          .getRepository(Template)
+          .save(ds.getRepository(Template).create({ id: 't2', sessionId: 's2', name: 'late', body: 'Hi' }));
+      }
+      return rows;
+    });
+
+    const dump = await controller.exportData();
+    jest.restoreAllMocks();
+
+    expect(dump.counts).toMatchObject({ sessions: 1, templates: 1 });
+    expect((dump.tables.templates as Array<{ id: string }>).map(t => t.id)).toEqual(['t1']);
+    await expect(controller.importData({ tables: dump.tables })).resolves.toMatchObject({ imported: true });
+  });
+
   it('releases the loss-detection token even when the transaction never opens', async () => {
     await seedSession('s1');
     const dump = await controller.exportData();
@@ -330,6 +452,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
         };
       },
       heldByOtherNodes: () => Promise.resolve([]),
+      claimableWhere: () => [],
     };
     // Stubbed rather than provoked: TypeORM nests a second startTransaction as SAVEPOINT, so no
     // dialect here rejects it today. What is pinned is the STRUCTURE — the pre-body span sits
@@ -342,14 +465,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
       return runner;
     });
 
-    const withOwnership = new InfraDataController(
-      cfg as never,
-      ds,
-      undefined,
-      undefined,
-      undefined,
-      ownership as never,
-    );
+    const withOwnership = newController(ownership);
     await expect(withOwnership.importData({ tables: dump.tables })).rejects.toThrow('within a transaction');
     jest.restoreAllMocks();
 
@@ -369,23 +485,73 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
         };
       },
       heldByOtherNodes: () => Promise.resolve([]),
+      claimableWhere: () => [],
     };
     jest.spyOn(ds, 'createQueryRunner').mockImplementation(() => {
       throw new Error('no connection available');
     });
 
-    const withOwnership = new InfraDataController(
-      cfg as never,
-      ds,
-      undefined,
-      undefined,
-      undefined,
-      ownership as never,
-    );
+    const withOwnership = newController(ownership);
     await expect(withOwnership.importData({ tables: dump.tables })).rejects.toThrow('no connection available');
     jest.restoreAllMocks();
 
     expect(held).toBe(0);
+  });
+
+  describe('gives the query runner back when the transaction never opens', () => {
+    const watchRunners = (prepare: (runner: ReturnType<DataSource['createQueryRunner']>) => void) => {
+      const releases: jest.SpyInstance[] = [];
+      const realCreate = ds.createQueryRunner.bind(ds);
+      jest.spyOn(ds, 'createQueryRunner').mockImplementation((...args: Parameters<typeof realCreate>) => {
+        const runner = realCreate(...args);
+        prepare(runner);
+        releases.push(jest.spyOn(runner, 'release'));
+        return runner;
+      });
+      return releases;
+    };
+
+    it('when BEGIN fails', async () => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      const releases = watchRunners(runner => {
+        runner.startTransaction = () => Promise.reject(new Error('BEGIN failed'));
+      });
+
+      await expect(controller.importData({ tables: dump.tables })).rejects.toThrow('BEGIN failed');
+
+      expect(releases).toHaveLength(1);
+      expect(releases[0]).toHaveBeenCalledTimes(1);
+      jest.restoreAllMocks();
+    });
+
+    it('when another transaction already holds the connection', async () => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      const releases = watchRunners(runner => {
+        Object.defineProperty(runner, 'isTransactionActive', { value: true });
+      });
+
+      await expect(controller.importData({ tables: dump.tables })).rejects.toMatchObject({
+        response: { code: 'IMPORT_NESTED_TRANSACTION' },
+      });
+
+      expect(releases).toHaveLength(1);
+      expect(releases[0]).toHaveBeenCalledTimes(1);
+      jest.restoreAllMocks();
+    });
+
+    it('and still reports the failure of BEGIN when giving the runner back fails too', async () => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      watchRunners(runner => {
+        runner.startTransaction = () => Promise.reject(new Error('BEGIN failed'));
+        runner.release = () => Promise.reject(new Error('release failed'));
+      });
+
+      await expect(controller.importData({ tables: dump.tables })).rejects.toThrow('BEGIN failed');
+      jest.restoreAllMocks();
+    });
   });
 
   it('does not suspend loss detection on a dialect where each query runner has its own connection', async () => {
@@ -399,6 +565,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
         return () => {};
       },
       heldByOtherNodes: () => Promise.resolve([]),
+      claimableWhere: () => [],
     };
     // Postgres hands every runner a dedicated pooled client, so the heartbeat cannot see the
     // import's uncommitted DELETE. Suspending there would disable genuine loss detection in exactly
@@ -409,14 +576,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     const realOptions = ds.options;
     Object.defineProperty(ds, 'options', { value: { ...realOptions, type: 'postgres' }, configurable: true });
 
-    const withOwnership = new InfraDataController(
-      cfg as never,
-      ds,
-      undefined,
-      undefined,
-      undefined,
-      ownership as never,
-    );
+    const withOwnership = newController(ownership);
     await withOwnership.importData({ tables: dump.tables }).catch(() => undefined);
     Object.defineProperty(ds, 'options', { value: realOptions, configurable: true });
 
@@ -452,6 +612,62 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     // The rollback must have restored the pre-import row, ownership and all.
     const stored = await ds.getRepository(Session).findOneByOrFail({ id: 's1' });
     expect(stored.nodeId).toBe('node-a');
+  });
+
+  it('answers imported:false with the real row error when PostgreSQL aborts the transaction', async () => {
+    await seedSession('s1');
+    await seedSession('s2');
+    const dump = await controller.exportData();
+
+    // PostgreSQL semantics on the SQLite harness: the first sessions INSERT fails, and from then on
+    // every statement except ROLLBACK fails with 25P02, as it would on an aborted PG transaction.
+    // The type flip is what the service keys its PostgreSQL handling on.
+    const realOptions = ds.options;
+    Object.defineProperty(ds, 'options', { value: { ...realOptions, type: 'postgres' }, configurable: true });
+    // better-sqlite3 hands out one runner per DataSource, so the patch is undone on that instance.
+    const runner = ds.createQueryRunner();
+    const realQuery = runner.query.bind(runner);
+    const sessionSettings: string[] = [];
+    jest.spyOn(ds, 'createQueryRunner').mockImplementation(() => {
+      let aborted = false;
+      runner.query = ((...callArgs: Parameters<typeof realQuery>) => {
+        const sql = callArgs[0];
+        // PostgreSQL accepts the transaction-local settings the import opens with; SQLite has no SET.
+        if (/^SET LOCAL /.test(sql)) {
+          sessionSettings.push(sql);
+          return Promise.resolve([]);
+        }
+        if (aborted && sql !== 'ROLLBACK') {
+          return Promise.reject(
+            new Error('current transaction is aborted, commands ignored until end of transaction block'),
+          );
+        }
+        if (/INSERT INTO sessions/.test(sql)) {
+          aborted = true;
+          return Promise.reject(new Error('duplicate key value violates unique constraint "PK_sessions"'));
+        }
+        return realQuery(...callArgs);
+      }) as typeof runner.query;
+      return runner;
+    });
+
+    let res: Awaited<ReturnType<typeof controller.importData>>;
+    try {
+      res = await controller.importData({ tables: dump.tables });
+    } finally {
+      jest.restoreAllMocks();
+      runner.query = realQuery;
+      Object.defineProperty(ds, 'options', { value: realOptions, configurable: true });
+    }
+
+    expect(res.imported).toBe(false);
+    expect(res.warnings).toEqual([
+      'Failed to import session s1: duplicate key value violates unique constraint "PK_sessions"',
+    ]);
+    expect((await ds.getRepository(Session).find()).map(s => s.id).sort()).toEqual(['s1', 's2']);
+    // The clears scale with the live tables, so the runtime statement timeout is lifted for this
+    // transaction (a lock wait keeps its bound).
+    expect(sessionSettings).toEqual(['SET LOCAL statement_timeout = 0', 'SET LOCAL lock_timeout = 30000']);
   });
 
   it('leaves a session that had no claim unclaimed rather than inventing one', async () => {
@@ -526,6 +742,414 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     const b = await ds.getRepository(MessageBatch).findOneByOrFail({ id: 'b1' });
     expect(b.batchId).toBe('BATCH1');
     expect(b.status).toBe(BatchStatus.COMPLETED);
+  });
+
+  // The export is unbounded while the import rides the 25mb body limit, so inline base64 can produce
+  // a backup this gateway cannot restore. What bounds it is an aggregate budget, not a blanket strip:
+  // a small photo costs nothing and is the ONLY copy when the chat-media archive is off (the default),
+  // so dropping it would trade a 413 for silent data loss.
+  const withBudget = async (bytes: number, run: () => Promise<void>): Promise<void> => {
+    const prev = process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES;
+    process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES = String(bytes);
+    try {
+      await run();
+    } finally {
+      if (prev === undefined) delete process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES;
+      else process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES = prev;
+    }
+  };
+
+  const exportedMeta = (
+    dump: Awaited<ReturnType<typeof controller.exportData>>,
+    id: string,
+  ): Record<string, unknown> => {
+    const row = dump.tables.messages.find(r => r.id === id);
+    return (typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : row?.metadata) as Record<string, unknown>;
+  };
+
+  it('keeps inline media that fits the export budget — it is the only copy when the archive is off', async () => {
+    const base64 = Buffer.from('a small photo, three orders of magnitude under any limit').toString('base64');
+    await seedSession('s1');
+    await ds.getRepository(Message).save(
+      ds.getRepository(Message).create({
+        id: 'm-small',
+        sessionId: 's1',
+        waMessageId: 'WA-SMALL',
+        chatId: 'c1@s.whatsapp.net',
+        from: 'a@s.whatsapp.net',
+        to: 'b@s.whatsapp.net',
+        body: null as never,
+        type: 'image',
+        direction: MessageDirection.INCOMING,
+        timestamp: 1700000000,
+        metadata: { media: { mimetype: 'image/jpeg', data: base64 }, ack: 2 },
+        status: MessageStatus.DELIVERED,
+      }),
+    );
+
+    await withBudget(1_000_000, async () => {
+      const meta = exportedMeta(await controller.exportData(), 'm-small');
+      expect(meta.media).toEqual({ mimetype: 'image/jpeg', data: base64 });
+    });
+  });
+
+  it('never strips a URL-referenced payload — `data` holds either base64 OR a URL', async () => {
+    // message.service.ts persists `data: base64 || dto.url!`, and the URL form is the only one the
+    // Swagger examples offer. A URL is a pointer, not bytes: stripping it destroys the reference and
+    // reports a sizeBytes that is Buffer.byteLength of URL text read as base64 — the size of nothing.
+    const url = 'https://cdn.example.com/promo.png';
+    await seedSession('s1');
+    await ds.getRepository(Message).save(
+      ds.getRepository(Message).create({
+        id: 'm-url',
+        sessionId: 's1',
+        waMessageId: 'WA-URL',
+        chatId: 'c1@s.whatsapp.net',
+        from: 'a@s.whatsapp.net',
+        to: 'b@s.whatsapp.net',
+        body: null as never,
+        type: 'image',
+        direction: MessageDirection.OUTGOING,
+        timestamp: 1700000000,
+        metadata: { media: { mimetype: 'image/png', filename: 'promo.png', data: url } },
+        status: MessageStatus.SENT,
+      }),
+    );
+
+    // Budget of zero: everything strippable WOULD be stripped, so surviving proves the URL guard.
+    await withBudget(0, async () => {
+      const meta = exportedMeta(await controller.exportData(), 'm-url');
+      expect(meta.media).toEqual({ mimetype: 'image/png', filename: 'promo.png', data: url });
+    });
+  });
+
+  it('never strips a URL whose scheme is uppercase — both engines fetch it, so it is a pointer too', async () => {
+    // `@IsUrl()` accepts it and both adapters match the scheme case-insensitively (wwebjs-messaging.ts
+    // `isHttpUrl`, baileys-messaging.ts `resolveMediaBuffer`), so this URL sends successfully and the
+    // row is its only record. Classifying it as bytes destroys that reference for good.
+    const url = 'HTTPS://cdn.example.com/PROMO.png';
+    await seedSession('s1');
+    await ds.getRepository(Message).save(
+      ds.getRepository(Message).create({
+        id: 'm-url-upper',
+        sessionId: 's1',
+        waMessageId: 'WA-URL-UPPER',
+        chatId: 'c1@s.whatsapp.net',
+        from: 'a@s.whatsapp.net',
+        to: 'b@s.whatsapp.net',
+        body: null as never,
+        type: 'image',
+        direction: MessageDirection.OUTGOING,
+        timestamp: 1700000000,
+        metadata: { media: { mimetype: 'image/png', filename: 'promo.png', data: url } },
+        status: MessageStatus.SENT,
+      }),
+    );
+
+    await withBudget(0, async () => {
+      const meta = exportedMeta(await controller.exportData(), 'm-url-upper');
+      expect(meta.media).toEqual({ mimetype: 'image/png', filename: 'promo.png', data: url });
+    });
+  });
+
+  it('spends the export budget on the newest media first', async () => {
+    // `SELECT *` has no ORDER BY, so the rows arrive in rowid order on SQLite — oldest first, the
+    // exact inverse of what a backup wants. Both photos fit alone; only one fits the budget.
+    const olderPhoto = Buffer.from('o'.repeat(600)).toString('base64');
+    const newerPhoto = Buffer.from('n'.repeat(600)).toString('base64');
+    await seedSession('s1');
+    const seedPhoto = async (id: string, timestamp: number, data: string): Promise<void> => {
+      await ds.getRepository(Message).save(
+        ds.getRepository(Message).create({
+          id,
+          sessionId: 's1',
+          waMessageId: `WA-${id}`,
+          chatId: 'c1@s.whatsapp.net',
+          from: 'a@s.whatsapp.net',
+          to: 'b@s.whatsapp.net',
+          body: null as never,
+          type: 'image',
+          direction: MessageDirection.INCOMING,
+          timestamp,
+          metadata: { media: { mimetype: 'image/jpeg', data } },
+          status: MessageStatus.DELIVERED,
+        }),
+      );
+    };
+    // Inserted oldest-first, which is also how SQLite hands them back.
+    await seedPhoto('m-older', 1700000000, olderPhoto);
+    await seedPhoto('m-newer', 1800000000, newerPhoto);
+
+    await withBudget(Buffer.byteLength(newerPhoto, 'utf8'), async () => {
+      const dump = await controller.exportData();
+      expect(exportedMeta(dump, 'm-newer').media).toEqual({ mimetype: 'image/jpeg', data: newerPhoto });
+      expect(exportedMeta(dump, 'm-older').media).toMatchObject({ omitted: true });
+    });
+  });
+
+  it('does not 500 the export when a metadata column holds the JSON text `null`', async () => {
+    // The import accepts a hand-edited archive verbatim (table-importers.ts), so this row is
+    // reachable — and `JSON.parse('null')` returns null, whose `.media` read throws.
+    await seedSession('s1');
+    await ds.query(
+      `INSERT INTO messages (id, "sessionId", "waMessageId", "chatId", "from", "to", body, type, direction, timestamp, metadata, status, "createdAt")
+       VALUES ('m-null', 's1', 'WA-NULL', 'c1@s.whatsapp.net', 'a@x', 'b@x', 'hi', 'text', 'incoming', 1700000000, 'null', 'delivered', '2026-01-01T00:00:00.000Z')`,
+    );
+
+    await withBudget(0, async () => {
+      const dump = await controller.exportData();
+      expect(dump.tables.messages.find(r => r.id === 'm-null')?.metadata).toBe('null');
+    });
+  });
+
+  it('drops inline media past the export budget, leaving the omitted marker and the rest intact', async () => {
+    // The marker shape is the engine's own (capInboundMedia), so a restored row is indistinguishable
+    // from one whose media was skipped on the way in: the schema survives, only the pixels go.
+    const base64 = Buffer.from('not really a jpeg, but bytes all the same').toString('base64');
+    await seedSession('s1');
+    await ds.getRepository(Message).save(
+      ds.getRepository(Message).create({
+        id: 'm-media',
+        sessionId: 's1',
+        waMessageId: 'WA-MEDIA',
+        chatId: 'c1@s.whatsapp.net',
+        from: 'a@s.whatsapp.net',
+        to: 'b@s.whatsapp.net',
+        body: null as never,
+        type: 'image',
+        direction: MessageDirection.INCOMING,
+        timestamp: 1700000000,
+        metadata: { media: { mimetype: 'image/jpeg', filename: 'holiday.jpg', data: base64 }, ack: 2 },
+        status: MessageStatus.DELIVERED,
+      }),
+    );
+
+    let dump!: Awaited<ReturnType<typeof controller.exportData>>;
+    await withBudget(0, async () => {
+      dump = await controller.exportData();
+    });
+    const exported = dump.tables.messages.find(r => r.id === 'm-media');
+    const meta = exportedMeta(dump, 'm-media') as { media: Record<string, unknown>; ack: number };
+
+    expect(meta.media).not.toHaveProperty('data');
+    expect(meta.media).toEqual({
+      mimetype: 'image/jpeg',
+      filename: 'holiday.jpg',
+      omitted: true,
+      sizeBytes: Buffer.byteLength(base64, 'base64'),
+    });
+    // Everything else on the row, and everything else in metadata, is untouched.
+    expect(meta.ack).toBe(2);
+    expect(exported?.type).toBe('image');
+    expect(exported?.waMessageId).toBe('WA-MEDIA');
+
+    // The count is what tells a truncated backup from a complete one: the marker alone is
+    // indistinguishable from media that was never downloaded in the first place.
+    expect(dump.omittedInlineMedia).toEqual({ messages: 1, messageBatches: 0 });
+
+    // And the backup still restores.
+    const res = await controller.importData({ tables: dump.tables });
+    expect(res.imported).toBe(true);
+    const restored = await ds.getRepository(Message).findOneByOrFail({ id: 'm-media' });
+    expect(restored.metadata).toEqual({
+      media: {
+        mimetype: 'image/jpeg',
+        filename: 'holiday.jpg',
+        omitted: true,
+        sizeBytes: Buffer.byteLength(base64, 'base64'),
+      },
+      ack: 2,
+    });
+  });
+
+  it('drops base64 from a bulk batch past the budget but keeps its URL and descriptive fields', async () => {
+    // message_batches carries the whole outbound list, base64 included, for the WHOLE duration of a
+    // run — stripBatchMediaPayloads only fires on the four terminal transitions. So the export has to
+    // bound it too, or the 413 the messages strip was written for simply arrives by another route.
+    await seedSession('s1');
+    await ds.getRepository(MessageBatch).save(
+      ds.getRepository(MessageBatch).create({
+        id: 'b-media',
+        batchId: 'BATCH-MEDIA',
+        sessionId: 's1',
+        status: BatchStatus.PROCESSING,
+        messages: [
+          {
+            chatId: 'c1',
+            type: 'image',
+            content: { image: { base64: 'QUJDREVG', mimetype: 'image/png', caption: 'hi' } },
+          },
+          {
+            chatId: 'c2',
+            type: 'image',
+            content: { image: { url: 'https://cdn.example.com/x.png', mimetype: 'image/png' } },
+          },
+        ] as never,
+        options: null as never,
+        progress: null as never,
+        results: null as never,
+        currentIndex: 0,
+        startedAt: null,
+        completedAt: null,
+      }),
+    );
+
+    await withBudget(0, async () => {
+      const dump = await controller.exportData();
+      const row = dump.tables.messageBatches.find(r => r.id === 'b-media');
+      const msgs = (typeof row?.messages === 'string' ? JSON.parse(row.messages) : row?.messages) as Array<{
+        content: { image: Record<string, unknown> };
+      }>;
+      expect(msgs[0].content.image).not.toHaveProperty('base64');
+      expect(msgs[0].content.image).toMatchObject({ mimetype: 'image/png', caption: 'hi' });
+      expect(msgs[1].content.image).toEqual({ url: 'https://cdn.example.com/x.png', mimetype: 'image/png' });
+      // Attributed to the batches arm, not lumped in with messages — an operator restoring this needs
+      // to know WHICH history came back without its media.
+      expect(dump.omittedInlineMedia).toEqual({ messages: 0, messageBatches: 1 });
+    });
+  });
+
+  it('spends the export budget on the newest bulk batch first', async () => {
+    // Same defect the `messages` pass was fixed for: `SELECT *` has no ORDER BY, so on SQLite the
+    // batches arrive oldest-first and an exhausted budget keeps the stalest run's payloads.
+    const olderPayload = Buffer.from('o'.repeat(600)).toString('base64');
+    const newerPayload = Buffer.from('n'.repeat(600)).toString('base64');
+    await seedSession('s1');
+    const seedBatch = async (id: string, createdAt: string, base64: string): Promise<void> => {
+      await ds.getRepository(MessageBatch).save(
+        ds.getRepository(MessageBatch).create({
+          id,
+          batchId: `BATCH-${id}`,
+          sessionId: 's1',
+          status: BatchStatus.PROCESSING,
+          messages: [{ chatId: 'c1', type: 'image', content: { image: { base64, mimetype: 'image/png' } } }] as never,
+          options: null as never,
+          progress: null as never,
+          results: null as never,
+          currentIndex: 0,
+          startedAt: null,
+          completedAt: null,
+        }),
+      );
+      // `created_at` is a @CreateDateColumn, so it cannot be seeded through the entity.
+      await ds.query(`UPDATE message_batches SET created_at = ? WHERE id = ?`, [createdAt, id]);
+    };
+    // Inserted oldest-first, which is also how SQLite hands them back.
+    await seedBatch('b-older', '2026-01-01T00:00:00.000Z', olderPayload);
+    await seedBatch('b-newer', '2026-06-01T00:00:00.000Z', newerPayload);
+
+    const batchImage = (
+      dump: Awaited<ReturnType<typeof controller.exportData>>,
+      id: string,
+    ): Record<string, unknown> => {
+      const row = dump.tables.messageBatches.find(r => r.id === id);
+      const msgs = (typeof row?.messages === 'string' ? JSON.parse(row.messages) : row?.messages) as Array<{
+        content: { image: Record<string, unknown> };
+      }>;
+      return msgs[0].content.image;
+    };
+
+    await withBudget(Buffer.byteLength(newerPayload, 'utf8'), async () => {
+      const dump = await controller.exportData();
+      expect(batchImage(dump, 'b-newer')).toEqual({ base64: newerPayload, mimetype: 'image/png' });
+      expect(batchImage(dump, 'b-older')).not.toHaveProperty('base64');
+    });
+  });
+
+  it('reads the media tables in chunks yet exports what a whole-table read did', async () => {
+    // Mixed sizes, tied timestamps, recency keys that are not finite (text in a bigint column, a
+    // created_at no parser accepts), URL pointers, rows without media, one payload bigger than a
+    // whole chunk, and ids that do not follow insertion order: everything the newest-first order and
+    // the first-fit spending of the budget depend on.
+    await seedSession('s1');
+    const photo = (bytes: number): string => Buffer.alloc(bytes, 7).toString('base64');
+    await ds.transaction(async manager => {
+      for (let i = 0; i < 450; i++) {
+        const timestamp = i % 37 === 0 ? null : i % 41 === 0 ? 'not-a-number' : 1_700_000_000 + (i % 50);
+        const data =
+          i === 200
+            ? photo(1_200_000)
+            : i % 61 === 0
+              ? 'https://cdn.example.com/p.png'
+              : photo(((i * 7919) % 6000) + 1);
+        const metadata = i % 53 === 0 ? null : JSON.stringify({ media: { mimetype: 'image/jpeg', data } });
+        await manager.query(
+          `INSERT INTO messages (id, "sessionId", "waMessageId", "chatId", "from", "to", type, direction, timestamp, metadata, status, "createdAt")
+           VALUES (?, 's1', ?, 'c1', 'a', 'b', 'image', 'incoming', ?, ?, 'delivered', '2026-01-01T00:00:00.000Z')`,
+          [`m-${(i * 7) % 450}`, `WA-${i}`, timestamp, metadata],
+        );
+      }
+      for (let i = 0; i < 12; i++) {
+        const createdAt = i % 5 === 0 ? 'garbage' : `2026-0${1 + (i % 3)}-01 00:00:00`;
+        const messages = JSON.stringify([
+          { chatId: 'c1', type: 'image', content: { image: { base64: photo(500 + i * 700), mimetype: 'image/png' } } },
+        ]);
+        await manager.query(
+          `INSERT INTO message_batches (id, batch_id, session_id, status, messages, current_index, created_at, updated_at)
+           VALUES (?, ?, 's1', 'processing', ?, 0, ?, ?)`,
+          [`b-${(i * 5) % 12}`, `BATCH-${i}`, messages, createdAt, createdAt],
+        );
+      }
+    });
+
+    // The export as it was: each media table read whole, then the shared budget spent over a
+    // newest-first copy with a non-finite key read as 0, messages before batches.
+    const wholeTableExport = async (budgetBytes: number) => {
+      let spent = 0;
+      const tables: Record<string, unknown[]> = {};
+      const omitted = { messages: 0, messageBatches: 0 };
+      for (const entry of EXPORT_TABLES) {
+        const media = entry.inlineMedia;
+        if (!media) continue;
+        const rows = await ds.query<never[]>(`SELECT * FROM ${entry.table}`);
+        entry.afterRead?.(rows);
+        const key = (row: never): number => {
+          const value = media.newestFirst(row);
+          return Number.isFinite(value) ? value : 0;
+        };
+        for (const row of [...rows].sort((a, b) => key(b) - key(a))) {
+          media.strip(row, bytes => {
+            if (spent + bytes > budgetBytes) {
+              omitted[media.bucket] += 1;
+              return true;
+            }
+            spent += bytes;
+            return false;
+          });
+        }
+        tables[entry.key] = rows;
+      }
+      return { tables, omitted };
+    };
+
+    const omittedByBudget: unknown[] = [];
+    for (const budget of [0, 150_000, 1_700_000, 1_760_000, 10_000_000]) {
+      await withBudget(budget, async () => {
+        const expected = await wholeTableExport(budget);
+        const query = jest.spyOn(ds, 'query');
+        const dump = await controller.exportData();
+        const reads = query.mock.calls.map(([sql]) => sql);
+        query.mockRestore();
+
+        expect(dump.tables.messages).toEqual(expected.tables.messages);
+        expect(dump.tables.messageBatches).toEqual(expected.tables.messageBatches);
+        expect(dump.omittedInlineMedia).toEqual(expected.omitted);
+        expect(dump.counts).toMatchObject({ messages: 450, messageBatches: 12 });
+        expect(dump.skippedTables).toEqual([]);
+        expect(reads).not.toContain('SELECT * FROM messages');
+        expect(reads).not.toContain('SELECT * FROM message_batches');
+        expect(reads.filter(sql => sql.startsWith('SELECT * FROM messages WHERE id IN')).length).toBeGreaterThan(2);
+        omittedByBudget.push(expected.omitted);
+      });
+    }
+    // The budgets above make both tables keep some payloads and drop others, not just all or nothing.
+    expect(omittedByBudget).toEqual([
+      { messages: 434, messageBatches: 12 },
+      { messages: 392, messageBatches: 12 },
+      { messages: 7, messageBatches: 12 },
+      { messages: 1, messageBatches: 5 },
+      { messages: 0, messageBatches: 0 },
+    ]);
   });
 
   it('round-trips plugin instances + integration delivery failures (Integration Fabric + DLQ)', async () => {
@@ -792,7 +1416,7 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     expect(await ds.getRepository(Session).findOneBy({ id: 's2' })).toBeNull();
   });
 
-  it('refuses an empty/garbage backup — does not wipe existing data (#488 review must-fix)', async () => {
+  it('refuses an empty/garbage backup — does not wipe existing data (#488)', async () => {
     await seedSession('s1');
     await ds.getRepository(Message).save(
       ds.getRepository(Message).create({
@@ -815,6 +1439,51 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
     expect(res.warnings.length).toBeGreaterThan(0);
     expect(await ds.getRepository(Session).count()).toBe(1);
     expect(await ds.getRepository(Message).count()).toBe(1);
+  });
+
+  it('refuses a backup whose template names of one session differ only by NUL, before any teardown', async () => {
+    await seedSession('s1');
+
+    // The restore drops NUL from a template name and (sessionId, name) is unique: importing both rows
+    // would fail the second insert and roll everything back, so the pre-flight refuses the backup.
+    const res = await controller.importData({
+      tables: {
+        sessions: [
+          {
+            id: 's1',
+            name: 'restored',
+            status: 'ready',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ] as never,
+        templates: [
+          {
+            id: 't1',
+            sessionId: 's1',
+            name: 'promo',
+            body: 'a',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+          {
+            id: 't2',
+            sessionId: 's1',
+            name: 'promo\u0000',
+            body: 'b',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ] as never,
+      },
+    });
+
+    expect(res.imported).toBe(false);
+    expect(res.warnings).toEqual([
+      'Skipped template t2: name "promo" without NUL characters collides with template t1 of session s1',
+    ]);
+    expect(await ds.getRepository(Session).count()).toBe(1);
+    expect(await ds.getRepository(Template).count()).toBe(0);
   });
 
   it('propagates a genuine clear-table failure (lock/IO) instead of committing a merged restore', async () => {
@@ -871,7 +1540,10 @@ describe('InfraDataController.importData round-trips export-data (no silent mess
       });
     });
 
-    await expect(controller.importData({ tables: { messages: [] } })).rejects.toThrow(/database is locked/);
+    // One row, so the archive is not refused as empty before the transaction opens.
+    await expect(controller.importData({ tables: { messages: [{ id: 'm2' }] } as never })).rejects.toThrow(
+      /database is locked/,
+    );
     expect(rolledBack).toBe(true);
 
     jest.restoreAllMocks();
@@ -882,13 +1554,32 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
   let ds: DataSource;
   let controller: InfraDataController;
   const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
-  const newController = () => new InfraDataController(cfg as never, ds);
+  const newController = () => new InfraDataController(new InfraDataService(cfg as never, ds));
 
   beforeEach(async () => {
     ds = new DataSource({
       type: 'better-sqlite3',
       database: ':memory:',
-      entities: [Session, Webhook, Message, MessageBatch, Template, BaileysStoredMessage, LidMapping],
+      // The full data-connection entity set, matching app.module.ts: exportData validates its table
+      // registry against the DataSource's entity metadata, so a subset would read as registry drift.
+      entities: [
+        Session,
+        Webhook,
+        Message,
+        MessageBatch,
+        Template,
+        BaileysStoredMessage,
+        LidMapping,
+        ChatState,
+        PluginInstance,
+        ConversationMapping,
+        IngressEvent,
+        WebhookDeliveryFailure,
+        WebhookOutboxEvent,
+        IntegrationDeliveryFailure,
+        StatusUpdate,
+        AutomationRule,
+      ],
       synchronize: true,
     });
     await ds.initialize();
@@ -920,7 +1611,7 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
   it('restores lid_mappings instead of dropping them on a backup→restore', async () => {
     await seedSession('s1');
     const lidRepo = ds.getRepository(LidMapping);
-    await lidRepo.save(lidRepo.create({ lid: '111', phone: '628111', sessionId: 's1' }));
+    await lidRepo.save(lidRepo.create({ lid: '111', phone: '628111', sessionId: 's1', isReported: true }));
     await lidRepo.save(lidRepo.create({ lid: '222', phone: null, sessionId: 's1' })); // negative cache
 
     const dump = await controller.exportData();
@@ -935,6 +1626,252 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
     expect(await lidRepo.count()).toBe(2);
     expect((await lidRepo.findOneByOrFail({ lid: '111' })).phone).toBe('628111');
     expect((await lidRepo.findOneByOrFail({ lid: '222' })).phone).toBeNull();
+    expect((await lidRepo.findOneByOrFail({ lid: '111' })).isReported).toBe(true);
+    expect((await lidRepo.findOneByOrFail({ lid: '222' })).isReported).toBe(false);
+
+    const mappings = (dump.tables as unknown as { lidMappings: { isReported?: boolean | number }[] }).lidMappings;
+    for (const mapping of mappings) delete mapping.isReported;
+    const legacy = await controller.importData({ tables: dump.tables });
+    expect(legacy.warnings).toEqual([]);
+    expect((await lidRepo.findOneByOrFail({ lid: '111' })).isReported).toBe(false);
+  });
+
+  // The mark of a deleted chat outlives a restart because the stored messages it guards do, and a
+  // restore brings both back.
+  it('restores the deletion mark of a chat state, and reads an archive taken without one as none', async () => {
+    await seedSession('s1');
+    const repo = ds.getRepository(ChatState);
+    await repo.save([
+      repo.create({ sessionId: 's1', chatId: '628111@s.whatsapp.net', deletedAt: 1790000000000 }),
+      repo.create({ sessionId: 's1', chatId: '120363@g.us', pinned: true }),
+    ]);
+
+    const dump = await controller.exportData();
+    await repo.clear();
+    const res = await controller.importData({ tables: dump.tables });
+
+    expect(res.warnings).toEqual([]);
+    expect(await repo.findOneByOrFail({ chatId: '628111@s.whatsapp.net' })).toMatchObject({ deletedAt: 1790000000000 });
+    expect(await repo.findOneByOrFail({ chatId: '120363@g.us' })).toMatchObject({ pinned: true, deletedAt: null });
+
+    const states = (dump.tables as unknown as { chatStates: { deletedAt?: number | null }[] }).chatStates;
+    for (const state of states) delete state.deletedAt;
+    const legacy = await controller.importData({ tables: dump.tables });
+    expect(legacy.warnings).toEqual([]);
+    expect((await repo.findOneByOrFail({ chatId: '628111@s.whatsapp.net' })).deletedAt).toBeNull();
+  });
+
+  // Restoring ONTO the instance that produced the archive is the rollback flow, and it is the one the
+  // outbox broke. The table carries no FK to sessions, so the sessions DELETE never reached it, and
+  // UNIQUE(webhookId, idempotencyKey) then collided on every row until the all-or-nothing gate rolled
+  // the entire import back. Every other table's test clears first, which is why nothing caught it;
+  // this one deliberately does not.
+  it('restores webhook_outbox_events onto an instance that already holds them', async () => {
+    await seedSession('s1');
+    const outboxRepo = ds.getRepository(WebhookOutboxEvent);
+    await outboxRepo.save(
+      outboxRepo.create({
+        webhookId: 'wh-1',
+        sessionId: 's1',
+        event: 'message.received',
+        idempotencyKey: 'key-1',
+        deliveryId: 'del-1',
+        payload: { from: '628111@c.us' },
+        state: 'pending',
+        attempts: 0,
+      }),
+    );
+
+    const dump = await controller.exportData();
+    expect((dump.tables as unknown as { webhookOutboxEvents?: unknown[] }).webhookOutboxEvents).toHaveLength(1);
+
+    const res = await controller.importData({ tables: dump.tables });
+
+    expect(res.warnings).toEqual([]);
+    expect(res.imported).toBe(true);
+    expect(await outboxRepo.count()).toBe(1);
+    expect((await outboxRepo.findOneByOrFail({ idempotencyKey: 'key-1' })).state).toBe('pending');
+  });
+
+  it('restores legacy terminal failures using a deterministic keeper without losing independent records', async () => {
+    await seedSession('s1');
+    const dump = await controller.exportData();
+    const base = {
+      webhookId: 'wh-1',
+      sessionId: 's1',
+      event: 'message.received',
+      url: 'https://receiver.example',
+      idempotencyKey: 'key-1',
+      deliveryId: null,
+      attempts: 3,
+      lastStatusCode: 503,
+      lastError: 'HTTP 503',
+      createdAt: '2026-10-05T00:00:00.000Z',
+    };
+    dump.tables.webhookDeliveryFailures = [
+      { ...base, id: 'a', attempts: 8 },
+      { ...base, id: 'b', payload: '{"body":"retained"}' },
+      { ...base, id: 'c', attempts: 0 },
+      { ...base, id: 'd', idempotencyKey: null },
+      { ...base, id: 'e', idempotencyKey: null },
+      { ...base, id: 'f', idempotencyKey: 'key-2', attempts: 5 },
+      { ...base, id: 'g', idempotencyKey: 'key-2', attempts: 5 },
+    ];
+    const result = await controller.importData({ tables: dump.tables });
+    expect(result.imported).toBe(true);
+    expect(result.warnings).toEqual([]);
+    const repository = ds.getRepository(WebhookDeliveryFailure);
+    expect((await repository.find({ order: { id: 'ASC' } })).map(row => row.id)).toEqual(['b', 'c', 'd', 'e', 'g']);
+    expect(result.counts.webhookDeliveryFailures).toBe(5);
+    expect(await repository.createQueryBuilder('failure').addSelect('failure.payload').getMany()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'b', payload: null })]),
+    );
+  });
+
+  it.each(['primary-key', 'missing-url'] as const)(
+    'preserves restore rollback for a %s error in terminal failures',
+    async problem => {
+      await seedSession('s1');
+      const dump = await controller.exportData();
+      const base = {
+        id: 'same-id',
+        webhookId: 'wh-1',
+        sessionId: 's1',
+        event: 'message.received',
+        url: 'https://receiver.example',
+        deliveryId: null,
+        attempts: 3,
+        lastStatusCode: 503,
+        lastError: 'HTTP 503',
+        createdAt: '2026-10-05T00:00:00.000Z',
+      };
+      dump.tables.webhookDeliveryFailures =
+        problem === 'primary-key'
+          ? [
+              { ...base, idempotencyKey: 'key-1' },
+              { ...base, idempotencyKey: 'key-2' },
+            ]
+          : [
+              { ...base, id: 'a', idempotencyKey: 'key-1', attempts: 1, url: null as unknown as string },
+              { ...base, id: 'b', idempotencyKey: 'key-1' },
+            ];
+      const result = await controller.importData({ tables: dump.tables });
+      expect(result.imported).toBe(false);
+      expect(result.warnings.join(' ')).toMatch(/UNIQUE constraint failed|NOT NULL constraint failed/);
+      expect(await ds.getRepository(Session).count()).toBe(1);
+    },
+  );
+
+  it('projects failure audit columns before reading retained payloads and supports the pre-payload schema', async () => {
+    await seedSession('s1');
+    const repository = ds.getRepository(WebhookDeliveryFailure);
+    await repository.save({
+      webhookId: 'wh-1',
+      sessionId: 's1',
+      event: 'message.received',
+      url: 'https://receiver.example',
+      idempotencyKey: 'key-1',
+      attempts: 3,
+      lastError: 'HTTP 503',
+      payload: { body: 'x'.repeat(2 * 1024 * 1024) },
+    });
+    const query = jest.spyOn(ds, 'query');
+    const dump = await controller.exportData();
+    expect(dump.tables.webhookDeliveryFailures).toHaveLength(1);
+    expect(dump.tables.webhookDeliveryFailures[0]).not.toHaveProperty('payload');
+    const reads = query.mock.calls.filter(([sql]) => /^SELECT .*FROM webhook_delivery_failures$/i.test(sql));
+    expect(reads).toHaveLength(1);
+    expect(reads[0][0]).not.toMatch(/\*|payload/);
+    await ds.query('ALTER TABLE webhook_delivery_failures DROP COLUMN payload');
+    expect((await controller.exportData()).tables.webhookDeliveryFailures).toEqual(dump.tables.webhookDeliveryFailures);
+  });
+
+  // A PostgreSQL export serializes CreateDateColumn/UpdateDateColumn values as ISO `...T...Z`, while
+  // TypeORM writes and compares them on SQLite as `YYYY-MM-DD HH:MM:SS.SSS`. Stored verbatim, a
+  // restored pending row never matched `createdAt < cutoff` on its own calendar day, so the replay
+  // sweep skipped the whole restored backlog until the next UTC day.
+  it('stores PostgreSQL-archived datetime columns in the SQLite form so same-day comparisons match', async () => {
+    const res = await controller.importData({
+      tables: {
+        sessions: [
+          {
+            id: 's1',
+            name: 'session-s1',
+            status: 'disconnected',
+            phone: null,
+            pushName: null,
+            config: {},
+            proxyUrl: null,
+            proxyType: null,
+            connectedAt: '2026-09-14T01:00:00.000Z',
+            lastActiveAt: null,
+            createdAt: '2026-09-14T01:00:00.000Z',
+            // Already in the SQLite form (a SQLite-made archive): carries no zone and stays untouched.
+            updatedAt: '2026-09-14 02:00:00.000',
+          },
+        ],
+        messageBatches: [
+          {
+            id: 'b1',
+            batch_id: 'batch-1',
+            session_id: 's1',
+            status: 'pending',
+            messages: [],
+            options: null,
+            progress: null,
+            results: null,
+            current_index: 0,
+            created_at: '2026-09-14T03:00:00.000Z',
+            updated_at: '2026-09-14T03:30:00.000+07:00',
+            started_at: null,
+            completed_at: null,
+          },
+        ],
+        webhookOutboxEvents: [
+          {
+            id: 'o1',
+            webhookId: 'wh-1',
+            sessionId: 's1',
+            event: 'message.received',
+            idempotencyKey: 'key-1',
+            deliveryId: 'del-1',
+            payload: JSON.stringify({ from: '628111@c.us' }),
+            state: 'pending',
+            attempts: 1,
+            lastAttemptAt: '2026-09-14T03:05:00.000Z',
+            createdAt: '2026-09-14T03:00:00.000Z',
+          },
+        ],
+      },
+    });
+
+    expect(res.warnings).toEqual([]);
+    expect(res.imported).toBe(true);
+
+    const [outbox] = await ds.query<unknown[]>('SELECT "createdAt", "lastAttemptAt" FROM webhook_outbox_events');
+    expect(outbox).toEqual({ createdAt: '2026-09-14 03:00:00.000', lastAttemptAt: '2026-09-14T03:05:00.000Z' });
+    const stale = await new WebhookOutboxService(ds.getRepository(WebhookOutboxEvent)).findStale(
+      new Date('2026-09-14T10:00:00.000Z'),
+      10,
+    );
+    expect(stale.map(row => row.idempotencyKey)).toEqual(['key-1']);
+
+    const [session] = await ds.query<unknown[]>('SELECT "connectedAt", "createdAt", "updatedAt" FROM sessions');
+    expect(session).toEqual({
+      connectedAt: '2026-09-14T01:00:00.000Z',
+      createdAt: '2026-09-14 01:00:00.000',
+      updatedAt: '2026-09-14 02:00:00.000',
+    });
+    const [batch] = await ds.query<unknown[]>('SELECT created_at, updated_at FROM message_batches');
+    expect(batch).toEqual({ created_at: '2026-09-14 03:00:00.000', updated_at: '2026-09-13 20:30:00.000' });
+  });
+
+  // A zoneless value must never be parsed: `new Date()` reads it as host-local time and shifts it. The
+  // millisecond-less forms change text when reformatted even on a UTC host, so this holds in any TZ.
+  it('leaves datetime values without a zone untouched', () => {
+    expect(toSqliteDatetime('2026-09-14 02:00:00')).toBe('2026-09-14 02:00:00');
+    expect(toSqliteDatetime('2026-09-14T02:00:00')).toBe('2026-09-14T02:00:00');
+    expect(toSqliteDatetime('2026-09-14T02:00:00Z')).toBe('2026-09-14 02:00:00.000');
   });
 
   // The messages import column list must carry every later-added column; `author` (the group
@@ -1045,7 +1982,7 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
         headers: {},
         active: true,
         retryCount: 3,
-        filters: { conditions: [{ field: 'sender', operator: 'equals', value: '123@c.us' }] },
+        filters: { conditions: [{ field: 'sender', operator: 'is', value: ['123@c.us'] }] },
       }),
     );
 
@@ -1054,33 +1991,73 @@ describe('InfraDataController.import/export preserves every data-DB table', () =
 
     expect(res.imported).toBe(true);
     expect((await ds.getRepository(Webhook).findOneByOrFail({ id: 'w1' })).filters).toEqual({
-      conditions: [{ field: 'sender', operator: 'equals', value: '123@c.us' }],
+      conditions: [{ field: 'sender', operator: 'is', value: ['123@c.us'] }],
     });
     // The active flag (exported as integer 1 from SQLite) must round-trip as a real boolean.
     expect((await ds.getRepository(Webhook).findOneByOrFail({ id: 'w1' })).active).toBe(true);
   });
+
+  it('omits webhook credentials (secret, headers) from the export but keeps the row restorable', async () => {
+    await seedSession('s1');
+    await ds.getRepository(Webhook).save(
+      ds.getRepository(Webhook).create({
+        id: 'w1',
+        sessionId: 's1',
+        url: 'https://example.com/hook',
+        events: ['message'],
+        secret: 'hmac-secret',
+        headers: { Authorization: 'Bearer receiver-token' },
+        active: true,
+        retryCount: 3,
+      }),
+    );
+
+    const dump = await controller.exportData();
+    expect(dump.tables.webhooks).toHaveLength(1);
+    const exported = dump.tables.webhooks[0] as unknown as Record<string, unknown>;
+    expect(exported).not.toHaveProperty('secret');
+    expect(exported).not.toHaveProperty('headers');
+    expect(exported.url).toBe('https://example.com/hook');
+
+    // The redacted archive still restores: the webhook comes back unsigned, with no custom headers.
+    const res = await controller.importData({ tables: dump.tables });
+    expect(res.warnings).toEqual([]);
+    expect(res.imported).toBe(true);
+    const restored = await ds.getRepository(Webhook).findOneByOrFail({ id: 'w1' });
+    expect(restored.secret).toBeNull();
+    expect(restored.headers).toEqual({});
+  });
 });
 
-describe('InfraDataController C002 audit trail — import emits only on a committed restore', () => {
+describe('InfraDataController audit trail — import emits only on a committed restore', () => {
   let ds: DataSource;
   const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
   const build = (audit: { logInfo: jest.Mock }): InfraDataController =>
-    new InfraDataController(cfg as never, ds, audit as never);
+    new InfraDataController(new InfraDataService(cfg as never, ds, audit as never));
 
   beforeEach(async () => {
     ds = new DataSource({
       type: 'better-sqlite3',
       database: ':memory:',
+      // The full data-connection entity set: exportData validates its table registry against the
+      // DataSource's entity metadata, so a subset would read as registry drift.
       entities: [
         Session,
         Webhook,
         Message,
         MessageBatch,
+        Template,
+        BaileysStoredMessage,
+        LidMapping,
+        ChatState,
         PluginInstance,
         ConversationMapping,
         IngressEvent,
         WebhookDeliveryFailure,
+        WebhookOutboxEvent,
         IntegrationDeliveryFailure,
+        StatusUpdate,
+        AutomationRule,
       ],
       synchronize: true,
     });
@@ -1119,6 +2096,30 @@ describe('InfraDataController C002 audit trail — import emits only on a commit
     expect(actions).toContain(AuditAction.INFRA_DATA_IMPORTED);
   });
 
+  it('records each orphan session it stops, even when the restore is then rolled back', async () => {
+    await seedSession('s1');
+    const audit = { logInfo: jest.fn().mockResolvedValue(null) };
+    const sessionService = {
+      getActiveSessionIds: () => ['ghost'],
+      stopOrphanEngines: jest.fn().mockResolvedValue({ stopped: ['ghost'], notRunning: [], failed: [] }),
+    };
+    const controller = new InfraDataController(
+      new InfraDataService(cfg as never, ds, audit as never, sessionService as never),
+    );
+    const dump = await controller.exportData();
+    // A repeated primary key fails its insert inside the transaction, which rolls the restore back.
+    dump.tables.sessions = [dump.tables.sessions[0], dump.tables.sessions[0]];
+
+    const res = await controller.importData({ tables: dump.tables, stopOrphans: true });
+
+    expect(res.imported).toBe(false);
+    const calls = audit.logInfo.mock.calls as Array<[AuditAction, { sessionId?: string; metadata?: unknown }]>;
+    expect(calls.filter(([action]) => action === AuditAction.INFRA_DATA_IMPORTED)).toEqual([]);
+    expect(calls.filter(([action]) => action === AuditAction.SESSION_STOPPED)).toEqual([
+      [AuditAction.SESSION_STOPPED, { sessionId: 'ghost', metadata: { via: 'infra_import_data' } }],
+    ]);
+  });
+
   it('does NOT emit INFRA_DATA_IMPORTED when an empty backup is refused (no data changed)', async () => {
     await seedSession('s1');
     const audit = { logInfo: jest.fn().mockResolvedValue(null) };
@@ -1131,30 +2132,111 @@ describe('InfraDataController C002 audit trail — import emits only on a commit
 
 describe('InfraDataController.exportData optional-table strictness', () => {
   const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
-  const build = (query: jest.Mock) => new InfraDataController(cfg as never, { query } as never);
+  // exportData validates its table registry against the DataSource's entity metadata before reading;
+  // the fake stands in for a fully-migrated connection so the registry check passes and the tests
+  // below pin the QUERY-time strictness instead.
+  const fakeDataSource = (query: jest.Mock, type: string): unknown => ({
+    query,
+    options: { type },
+    entityMetadatas: EXPORT_TABLES.map(entry => ({ tableName: entry.table })),
+  });
+  const build = (query: jest.Mock, type = 'better-sqlite3') =>
+    new InfraDataController(new InfraDataService(cfg as never, fakeDataSource(query, type) as never));
+  // Any read of the messages table, whichever of the export's statements it is.
+  const readsMessages = (sql: string): boolean => / FROM messages\b/.test(sql);
+
+  type Row = Record<string, unknown>;
+  const mediaData = (row: Row): string | undefined =>
+    typeof row.metadata === 'string'
+      ? (JSON.parse(row.metadata) as { media?: { data?: string } } | null)?.media?.data
+      : undefined;
+
+  /**
+   * A messages table answering each statement the way a database would: the key read, a full-row
+   * read by id (in table order, not the order the ids were asked in) and a bare `SELECT *`. Every
+   * read hands out fresh copies, and `heldBeforeRead` records the payload bytes still carried by rows
+   * handed out earlier at each full-row read. Every other table reads empty.
+   */
+  const messagesTable = (rows: Row[]) => {
+    const handedOut: Row[] = [];
+    const heldBeforeRead: number[] = [];
+    const handOut = (subset: Row[]): Row[] => {
+      heldBeforeRead.push(handedOut.reduce((sum, row) => sum + Buffer.byteLength(mediaData(row) ?? ''), 0));
+      const copies = subset.map(row => ({ ...row }));
+      handedOut.push(...copies);
+      return copies;
+    };
+    const query = jest.fn((sql: string, params: unknown[] = []) => {
+      if (!readsMessages(sql)) return Promise.resolve([]);
+      if (sql.startsWith('SELECT id, "timestamp", OCTET_LENGTH("metadata") AS "payloadBytes" FROM')) {
+        return Promise.resolve(
+          rows.map(row => ({
+            id: row.id,
+            timestamp: row.timestamp,
+            payloadBytes: typeof row.metadata === 'string' ? Buffer.byteLength(row.metadata) : null,
+          })),
+        );
+      }
+      if (sql.startsWith('SELECT * FROM messages WHERE id IN (')) {
+        return Promise.resolve(handOut(rows.filter(row => params.includes(row.id))));
+      }
+      if (sql === 'SELECT * FROM messages') return Promise.resolve(handOut(rows));
+      return Promise.reject(new Error(`unexpected read: ${sql}`));
+    });
+    return Object.assign(query, { heldBeforeRead });
+  };
+  const chunkReads = (query: jest.Mock): Array<[string, unknown[]]> =>
+    (query.mock.calls as Array<[string, unknown[]?]>)
+      .filter(([sql]) => readsMessages(sql) && !sql.startsWith('SELECT id,'))
+      .map(([sql, params]) => [sql, params ?? []]);
+  const photoRow = (id: string, timestamp: unknown, data: string | null): Row => ({
+    id,
+    sessionId: 's1',
+    waMessageId: `WA-${id}`,
+    chatId: 'c1',
+    chatName: null,
+    author: null,
+    from: 'a',
+    to: 'b',
+    body: null,
+    type: data === null ? 'text' : 'image',
+    direction: 'incoming',
+    timestamp,
+    metadata: data === null ? null : JSON.stringify({ media: { mimetype: 'image/jpeg', data } }),
+    status: 'delivered',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  });
+  const withExportBudget = async <T>(bytes: number, run: () => Promise<T>): Promise<T> => {
+    const prev = process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES;
+    process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES = String(bytes);
+    try {
+      return await run();
+    } finally {
+      if (prev === undefined) delete process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES;
+      else process.env.EXPORT_INLINE_MEDIA_BUDGET_BYTES = prev;
+    }
+  };
 
   it('rethrows a non-missing-table error (lock/IO/timeout) instead of reporting a partial export as complete', async () => {
     // A lock on ONE optional table must fail the whole export: silently exporting without that table
     // produces a backup the import then treats as authoritative, DELETing the table's existing rows.
     const query = jest.fn((sql: string) =>
-      sql === 'SELECT * FROM messages'
-        ? Promise.reject(new Error('SQLITE_BUSY: database is locked'))
-        : Promise.resolve([]),
+      readsMessages(sql) ? Promise.reject(new Error('SQLITE_BUSY: database is locked')) : Promise.resolve([]),
     );
     await expect(build(query).exportData()).rejects.toThrow(/database is locked/);
   });
 
   it('tolerates a genuinely absent optional table — and marks it in skippedTables', async () => {
     const missing = Object.assign(new Error('no such table: messages'), { name: 'SqliteError' });
-    const query = jest.fn((sql: string) =>
-      sql === 'SELECT * FROM messages' ? Promise.reject(missing) : Promise.resolve([]),
-    );
+    const query = jest.fn((sql: string) => (readsMessages(sql) ? Promise.reject(missing) : Promise.resolve([])));
     const dump = await build(query).exportData();
     expect(dump.counts.messages).toBe(0);
     expect(dump.tables.messages).toEqual([]);
     expect(dump.skippedTables).toContain('messages');
     // Every other table still exported (all empty here, none skipped).
     expect(dump.skippedTables).toEqual(['messages']);
+    // The key read found the table missing; nothing read it again.
+    expect(query.mock.calls.filter(([sql]) => readsMessages(sql))).toHaveLength(1);
   });
 
   it('strips the Postgres generated body_ts tsvector from exported message rows', async () => {
@@ -1178,11 +2260,82 @@ describe('InfraDataController.exportData optional-table strictness', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
       body_ts: "'hello'",
     };
-    const query = jest.fn((sql: string) => Promise.resolve(sql === 'SELECT * FROM messages' ? [messageRow] : []));
-    const dump = await build(query).exportData();
+    const dump = await build(messagesTable([messageRow])).exportData();
     expect(dump.tables.messages).toHaveLength(1);
     expect(dump.tables.messages[0]).not.toHaveProperty('body_ts');
     expect(dump.tables.messages[0].body).toBe('hello');
+  });
+
+  it('reads messages in bounded chunks and holds no more than the budget of payload between them', async () => {
+    // 450 photos of 40 KB of base64 each, 18 MB in all, of which a 100 KB budget keeps the newest two.
+    // A bare `SELECT *` put every one of them on the heap before the budget dropped any.
+    const rows = Array.from({ length: 450 }, (_, i) =>
+      photoRow(`m${i}`, 1_700_000_000 + i, Buffer.alloc(30_000, i).toString('base64')),
+    );
+    const query = messagesTable(rows);
+
+    const dump = await withExportBudget(100_000, () => build(query).exportData());
+
+    const reads = chunkReads(query);
+    expect(reads.map(([sql]) => sql)).not.toContain('SELECT * FROM messages');
+    expect(reads.length).toBeGreaterThan(1);
+    for (const [, ids] of reads) {
+      const bytes = rows.filter(row => ids.includes(row.id)).reduce((sum, row) => sum + String(row.metadata).length, 0);
+      expect(ids.length).toBeLessThanOrEqual(200);
+      if (ids.length > 1) expect(bytes).toBeLessThanOrEqual(1024 * 1024);
+    }
+    for (const held of query.heldBeforeRead) expect(held).toBeLessThanOrEqual(100_000);
+
+    // Same rows in table order, the same two newest payloads kept, every other one counted.
+    expect(dump.tables.messages.map(row => row.id)).toEqual(rows.map(row => row.id));
+    const kept = dump.tables.messages.filter(row => mediaData(row as never) !== undefined).map(row => row.id);
+    expect(kept).toEqual(['m448', 'm449']);
+    expect(dump.omittedInlineMedia).toEqual({ messages: 448, messageBatches: 0 });
+    expect(dump.counts.messages).toBe(450);
+  });
+
+  it.each([
+    ['better-sqlite3', '?'],
+    ['postgres', '$'],
+  ])('binds the chunk ids in the %s placeholder style, at most 200 per read', async (type, style) => {
+    // No media at all, so only the row cap splits the reads.
+    const rows = Array.from({ length: 201 }, (_, i) => photoRow(`m${i}`, 1_700_000_000 + i, null));
+    const query = messagesTable(rows);
+
+    const dump = await build(query, type).exportData();
+
+    const placeholders = (n: number): string =>
+      Array.from({ length: n }, (_, i) => (style === '$' ? `$${i + 1}` : '?')).join(', ');
+    const newestFirstIds = rows.map(row => row.id).reverse();
+    expect(chunkReads(query)).toEqual([
+      [`SELECT * FROM messages WHERE id IN (${placeholders(200)})`, newestFirstIds.slice(0, 200)],
+      [`SELECT * FROM messages WHERE id IN (${placeholders(1)})`, newestFirstIds.slice(200)],
+    ]);
+    expect(dump.counts.messages).toBe(201);
+  });
+
+  it('fails the export when the media table disappears between its key read and a chunk read', async () => {
+    // Only the key read may report the table as skipped. Past it, a missing table means rows were
+    // already read, and exporting them as "skipped" or as a partial table would both be wrong.
+    const missing = Object.assign(new Error('no such table: messages'), { name: 'SqliteError' });
+    const table = messagesTable([photoRow('m1', 1_700_000_000, 'QUJD')]);
+    const query = jest.fn((sql: string, params?: unknown[]) =>
+      sql.startsWith('SELECT * FROM messages') ? Promise.reject(missing) : table(sql, params),
+    );
+
+    await expect(build(query).exportData()).rejects.toThrow(/no such table: messages/);
+  });
+
+  it('leaves out a row deleted between the key read and its chunk read', async () => {
+    const table = messagesTable([photoRow('m1', 1_700_000_000, null), photoRow('m2', 1_700_000_001, null)]);
+    const query = jest.fn((sql: string, params: unknown[] = []) =>
+      table(sql, sql.includes(' WHERE id IN (') ? params.filter(id => id !== 'm1') : params),
+    );
+
+    const dump = await build(query).exportData();
+
+    expect(dump.tables.messages.map(row => row.id)).toEqual(['m2']);
+    expect(dump.counts.messages).toBe(1);
   });
 });
 
@@ -1190,11 +2343,21 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
   let ds: DataSource;
   const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
 
-  // Positional constructor: (config, dataDs, auditService?, sessionService?, lidMappingStore?).
-  // The @Optional args trail the required ones; auditService is unused in these tests, so its slot
-  // stays undefined.
-  const build = (opts: { sessionService?: unknown; lidMappingStore?: unknown } = {}) =>
-    new InfraDataController(cfg as never, ds, undefined, opts.sessionService as never, opts.lidMappingStore as never);
+  // Positional service constructor: (config, dataDs, auditService?, sessionService?, lidMappingStore?,
+  // ownership?, chatStateStore?). The @Optional args trail the required ones; auditService and
+  // ownership are unused in these tests, so their slots stay undefined.
+  const build = (opts: { sessionService?: unknown; lidMappingStore?: unknown; chatStateStore?: unknown } = {}) =>
+    new InfraDataController(
+      new InfraDataService(
+        cfg as never,
+        ds,
+        undefined,
+        opts.sessionService as never,
+        opts.lidMappingStore as never,
+        undefined,
+        opts.chatStateStore as never,
+      ),
+    );
 
   beforeEach(async () => {
     ds = new DataSource({
@@ -1208,10 +2371,12 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
         Template,
         BaileysStoredMessage,
         LidMapping,
+        ChatState,
         PluginInstance,
         ConversationMapping,
         IngressEvent,
         WebhookDeliveryFailure,
+        WebhookOutboxEvent,
         IntegrationDeliveryFailure,
         StatusUpdate,
         AutomationRule,
@@ -1244,6 +2409,176 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
   // automation_rules FKs sessions ON DELETE CASCADE, so the import's `DELETE FROM sessions` takes
   // every rule with it — on SQLite too, where better-sqlite3 enforces foreign keys. Without export +
   // re-insert the documented backup/restore silently destroyed every autoreply rule.
+  it('restores an active session status as disconnected: the backup describes the source host engines', async () => {
+    await seedSession('s1');
+    const repo = ds.getRepository(Session);
+    const dump = await build().exportData();
+    // seedSession writes READY; the export carries it. With no ownership service (single-node
+    // default), every row is claimable, so the import must normalize it.
+    expect(dump.tables.sessions?.[0]?.status).toBe(SessionStatus.READY);
+
+    const res = await build().importData({ tables: dump.tables });
+
+    expect(res.imported).toBe(true);
+    await expect(repo.findOneByOrFail({ id: 's1' })).resolves.toMatchObject({ status: SessionStatus.DISCONNECTED });
+    expect(res.notices?.some(n => n.includes('restored as disconnected'))).toBe(true);
+  });
+
+  it('keeps the backup status of a session held by a PEER (its live engine backs the row)', async () => {
+    await seedSession('held');
+    const repo = ds.getRepository(Session);
+    // A peer's unexpired claim: not claimable by this node, so the normalization must skip it.
+    // The import re-applies the preserved claim after the inserts (restoreSessionOwnership), which
+    // is what keeps the row excluded when the normalization runs.
+    await repo.update({ id: 'held' }, { nodeId: 'node-b', leaseExpiresAt: new Date(Date.now() + 60_000) });
+    const dump = await build().exportData();
+
+    const ownership = {
+      nodeId: 'node-a',
+      heldByOtherNodes: () => Promise.resolve(['held']),
+      suspendLossDetection: () => () => undefined,
+      claimableWhere: () => [{ nodeId: IsNull() }, { nodeId: 'node-a' }],
+    };
+    const res = await new InfraDataController(
+      new InfraDataService(cfg as never, ds, undefined, undefined, undefined, ownership as never),
+    ).importData({ tables: dump.tables });
+
+    expect(res.imported).toBe(true);
+    await expect(repo.findOneByOrFail({ id: 'held' })).resolves.toMatchObject({ status: SessionStatus.READY });
+  });
+
+  // Archives taken before 0.23.5 key chat_states by session name; the re-key migration has already
+  // run on the target, so the import has to apply it to the restored rows itself.
+  const chatStateRow = (sessionId: string, updatedAt: unknown) => ({
+    sessionId,
+    chatId: 'c@s.whatsapp.net',
+    muteEndTime: null,
+    archived: false,
+    pinned: true,
+    updatedAt,
+  });
+  const storedChatStates = () =>
+    ds.query<Array<{ sessionId: string; chatId: string }>>(
+      'SELECT "sessionId", "chatId" FROM chat_states ORDER BY "sessionId"',
+    );
+
+  it('re-keys a chat state row restored from a name-keyed archive onto its session id', async () => {
+    const id = '8f5b1d9e-0c4a-4e21-9d6b-2a7c3f0e1b44';
+    await seedSession(id);
+    const dump = await build().exportData();
+    const session = dump.tables.sessions[0];
+
+    const res = await build().importData({
+      tables: { ...dump.tables, chatStates: [chatStateRow(session.name, session.updatedAt)] as never },
+    });
+
+    expect(res.imported).toBe(true);
+    expect(await storedChatStates()).toEqual([{ sessionId: id, chatId: 'c@s.whatsapp.net' }]);
+  });
+
+  it('leaves a chat state row already keyed by a session id alone, even when another session is named that id', async () => {
+    // Session 'a' is named 'session-a', which is also the id of the second session. The row belongs
+    // to the second session and must not be moved onto 'a'.
+    await seedSession('a');
+    await seedSession('session-a');
+    const dump = await build().exportData();
+    const updatedAt = dump.tables.sessions[0].updatedAt;
+
+    const res = await build().importData({
+      tables: { ...dump.tables, chatStates: [chatStateRow('session-a', updatedAt)] as never },
+    });
+
+    expect(res.imported).toBe(true);
+    expect(await storedChatStates()).toEqual([{ sessionId: 'session-a', chatId: 'c@s.whatsapp.net' }]);
+  });
+
+  // The revoked-content and lid-mapping scrubs have already run on the target too, so rows restored
+  // from an archive taken before them are cleaned by the import itself.
+  it('clears restored revoked messages and drops restored lid mappings whose phone is not a number', async () => {
+    await seedSession('s1');
+    const dump = await build().exportData();
+    const at = dump.tables.sessions[0].updatedAt;
+    const message = (id: string, chatId: string, type: string) => ({
+      id,
+      sessionId: 's1',
+      waMessageId: `W-${id}`,
+      chatId,
+      chatName: null,
+      author: null,
+      from: chatId,
+      to: 'me@c.us',
+      body: 'hello',
+      type,
+      direction: MessageDirection.INCOMING,
+      timestamp: 1,
+      metadata: { quote: { body: 'quoted' }, reactions: [{ emoji: 'x' }] },
+      status: MessageStatus.DELIVERED,
+      createdAt: at,
+      mediaPath: `media/s1/${id}.jpg`,
+      mediaMimetype: 'image/jpeg',
+    });
+    const lid = (id: string, phone: string) => ({ lid: id, phone, sessionId: 's1', updatedAt: at });
+
+    const res = await build().importData({
+      tables: {
+        ...dump.tables,
+        messages: [message('revoked', 'c@c.us', 'revoked'), message('kept', '120363@broadcast', 'image')],
+        lidMappings: [lid('1', 'status'), lid('2', '120363'), lid('3', '628123')],
+      },
+    });
+
+    expect(res.imported).toBe(true);
+    expect(await ds.query('SELECT id, body, metadata, "mediaPath", "mediaMimetype" FROM messages ORDER BY id')).toEqual(
+      [
+        {
+          id: 'kept',
+          body: 'hello',
+          metadata: JSON.stringify({ quote: { body: 'quoted' }, reactions: [{ emoji: 'x' }] }),
+          mediaPath: 'media/s1/kept.jpg',
+          mediaMimetype: 'image/jpeg',
+        },
+        { id: 'revoked', body: '', metadata: null, mediaPath: null, mediaMimetype: null },
+      ],
+    );
+    expect(await ds.query('SELECT lid, phone FROM lid_mappings')).toEqual([{ lid: '3', phone: '628123' }]);
+  });
+
+  // Boot no longer converts the raw whatsapp-web.js tokens on a migration-managed database, so an archive taken
+  // before the neutral vocabulary has to be converted by the import that restores it.
+  it('converts the raw message types of a restored archive and leaves the neutral ones alone', async () => {
+    await seedSession('s1');
+    const dump = await build().exportData();
+    const at = dump.tables.sessions[0].updatedAt;
+    const message = (id: string, type: string) => ({
+      id,
+      sessionId: 's1',
+      waMessageId: `W-${id}`,
+      chatId: 'c@c.us',
+      chatName: null,
+      author: null,
+      from: 'c@c.us',
+      to: 'me@c.us',
+      body: 'hello',
+      type,
+      direction: MessageDirection.INCOMING,
+      timestamp: 1,
+      metadata: null,
+      status: MessageStatus.DELIVERED,
+      createdAt: at,
+      mediaPath: null,
+      mediaMimetype: null,
+    });
+    const types = ['chat', 'ptt', 'vcard', 'multi_vcard', 'image', 'call_log', 'text'];
+
+    const res = await build().importData({
+      tables: { ...dump.tables, messages: types.map((type, i) => message(`m${i}`, type)) },
+    });
+
+    expect(res.imported).toBe(true);
+    const stored = await ds.query<Array<{ id: string; type: string }>>('SELECT id, type FROM messages ORDER BY id');
+    expect(stored.map(row => row.type)).toEqual(['text', 'voice', 'contact', 'contact', 'image', 'call_log', 'text']);
+  });
+
   it('exports and restores automation_rules, which the session wipe would otherwise cascade away', async () => {
     await seedSession('s1');
     const ruleRepo = ds.getRepository(AutomationRule);
@@ -1253,7 +2588,7 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
         sessionId: 's1',
         name: 'office hours',
         enabled: true,
-        conditions: { bodyContains: ['hello'] } as never,
+        conditions: { conditions: [{ field: 'body', operator: 'contains', value: 'hello' }] },
         replyText: 'We are closed',
         cooldownSeconds: 120,
       }),
@@ -1272,7 +2607,7 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
     expect(restored.replyText).toBe('We are closed');
     expect(restored.cooldownSeconds).toBe(120);
     expect(restored.enabled).toBe(true);
-    expect(restored.conditions).toEqual({ bodyContains: ['hello'] });
+    expect(restored.conditions).toEqual({ conditions: [{ field: 'body', operator: 'contains', value: 'hello' }] });
   });
 
   it('exports and restores status_updates (the table the docs promise is covered)', async () => {
@@ -1363,22 +2698,26 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
     expect((await ds.getRepository(Message).findOneByOrFail({ id: 'm1' })).body).toBe('hello');
   });
 
-  it('reloads the in-memory lid mappings after a committed restore', async () => {
+  it('reloads the in-memory lid mappings and chat states after a committed restore', async () => {
     await seedSession('s1');
     const lidMappingStore = { reload: jest.fn().mockResolvedValue(undefined) };
-    const controller = build({ lidMappingStore });
+    const chatStateStore = { reload: jest.fn().mockResolvedValue(undefined) };
+    const controller = build({ lidMappingStore, chatStateStore });
     const dump = await controller.exportData();
     const res = await controller.importData({ tables: dump.tables });
     expect(res.imported).toBe(true);
     expect(lidMappingStore.reload).toHaveBeenCalledTimes(1);
+    expect(chatStateStore.reload).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT reload lid mappings when the import is refused (nothing committed)', async () => {
+  it('does NOT reload lid mappings or chat states when the import is refused (nothing committed)', async () => {
     await seedSession('s1');
     const lidMappingStore = { reload: jest.fn().mockResolvedValue(undefined) };
-    const res = await build({ lidMappingStore }).importData({ tables: {} });
+    const chatStateStore = { reload: jest.fn().mockResolvedValue(undefined) };
+    const res = await build({ lidMappingStore, chatStateStore }).importData({ tables: {} });
     expect(res.imported).toBe(false);
     expect(lidMappingStore.reload).not.toHaveBeenCalled();
+    expect(chatStateStore.reload).not.toHaveBeenCalled();
   });
 
   it('409s when a live engine would be orphaned by the replace — unless force=true', async () => {
@@ -1435,6 +2774,50 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
     expect(res.stoppedOrphanEngines).toEqual(['ghost']);
     expect(res.failedOrphanEngines).toEqual([]);
     expect(res.orphanedEngines).toEqual(['ghost']);
+  });
+
+  it('refuses an archive with no rows before stopOrphans tears down any engine', async () => {
+    // With no sessions in the archive every running engine looks orphaned, and the teardown cannot be
+    // undone, yet a backup without rows is always refused. Nothing may be stopped for it.
+    await seedSession('s1');
+    const stopOrphanEngines = jest.fn().mockResolvedValue({ stopped: ['s1'], notRunning: [], failed: [] });
+    const controller = build({ sessionService: { getActiveSessionIds: () => ['s1'], stopOrphanEngines } });
+
+    const res = await controller.importData({ tables: { sessions: [], messages: [] }, stopOrphans: true });
+
+    expect(res.imported).toBe(false);
+    expect(res.warnings).toEqual([
+      'Backup contained no rows to restore; refused to replace existing data. Check the file.',
+    ]);
+    expect(stopOrphanEngines).not.toHaveBeenCalled();
+    expect(res.stoppedOrphanEngines).toEqual([]);
+    expect(await ds.getRepository(Session).count()).toBe(1);
+  });
+
+  it('refuses an archive holding a row the import would skip before stopOrphans tears down any engine', async () => {
+    // A skipped row always rolls the restore back, and the teardown cannot be undone with it.
+    await seedSession('s1');
+    const stopOrphanEngines = jest.fn().mockResolvedValue({ stopped: ['ghost'], notRunning: [], failed: [] });
+    const controller = build({
+      sessionService: { getActiveSessionIds: () => ['ghost'], stopOrphanEngines },
+    });
+    const dump = await controller.exportData();
+    const filters = { conditions: [{ field: 'type', operator: 'is', value: ['text'], negate: true }] };
+
+    const res = await controller.importData({
+      tables: {
+        ...dump.tables,
+        webhooks: [{ id: 'wh1', sessionId: 's1', url: 'https://example.com/hook', events: [], filters }] as never,
+      },
+      stopOrphans: true,
+    });
+
+    expect(res.imported).toBe(false);
+    expect(res.warnings).toEqual([expect.stringContaining('Skipped webhook wh1')]);
+    expect(stopOrphanEngines).not.toHaveBeenCalled();
+    expect(res.stoppedOrphanEngines).toEqual([]);
+    expect(res.orphanedEngines).toEqual([]);
+    expect(await ds.getRepository(Session).count()).toBe(1);
   });
 
   it('still reports the engines it already stopped when the import rolls back', async () => {
@@ -1539,13 +2922,14 @@ describe('InfraDataController.importData status_updates + runtime reconciliation
   });
 });
 
-// C002: the infra module exposed sensitive ADMIN operations (credential config write, restart/Docker
-// orchestration, full-DB + storage export/import) with no audit trail. Each now emits an AuditAction.
-describe('InfraDataController C002 audit trail (light-dependency handlers)', () => {
+// The infra module's sensitive ADMIN operations (credential config write, restart/Docker
+// orchestration, full-DB + storage export/import) must leave an audit trail — each emits an AuditAction.
+describe('InfraDataController audit trail (light-dependency handlers)', () => {
   const makeAudit = (): { logInfo: jest.Mock } => ({ logInfo: jest.fn().mockResolvedValue(null) });
 
-  // Positional constructor: (config, dataDs, auditService?, sessionService?, lidMappingStore?).
-  // auditService is the first trailing @Optional arg.
+  // Positional service constructor: (config, dataDs, auditService?, sessionService?, lidMappingStore?).
+  // auditService is the first trailing @Optional arg. The dataDs override needs entityMetadatas so
+  // exportData's registry check sees a fully-migrated connection.
   const build = (
     audit: { logInfo: jest.Mock },
     overrides: Partial<{
@@ -1553,13 +2937,18 @@ describe('InfraDataController C002 audit trail (light-dependency handlers)', () 
       dataDs: unknown;
     }> = {},
   ): InfraDataController =>
-    new InfraDataController((overrides.config ?? {}) as never, (overrides.dataDs ?? {}) as never, audit as never);
+    new InfraDataController(
+      new InfraDataService((overrides.config ?? {}) as never, (overrides.dataDs ?? {}) as never, audit as never),
+    );
 
   it('exportData emits INFRA_DATA_EXPORTED with per-table counts', async () => {
     const audit = makeAudit();
     const controller = build(audit, {
       config: { get: (k: string, d?: unknown) => (k === 'dataDatabase.type' ? 'sqlite' : d) },
-      dataDs: { query: jest.fn().mockResolvedValue([]) },
+      dataDs: {
+        query: jest.fn().mockResolvedValue([]),
+        entityMetadatas: EXPORT_TABLES.map(entry => ({ tableName: entry.table })),
+      },
     });
     await controller.exportData();
     const calls = audit.logInfo.mock.calls as Array<[AuditAction, { metadata: { counts: { sessions: number } } }]>;
@@ -1683,5 +3072,190 @@ describe('restoreSessionOwnership', () => {
     expect((asDate as Date).toISOString()).toBe('2026-08-06T10:02:30.000Z');
     expect(typeof (await bindLease('2026-08-06T10:00:30.000Z', readAt, commitAt))).toBe('string');
     expect(await bindLease(null, readAt, commitAt)).toBeNull();
+  });
+});
+
+/**
+ * `data.tables.sessions` was dereferenced with `.map()` before anything checked it was an array, so a
+ * hand-edited or truncated archive whose table value is a string (or an array of nulls) produced a
+ * TypeError — a 500 that tells the operator the server broke, when what actually happened is that
+ * their file is malformed. It fires before the transaction opens, so nothing was written; only the
+ * answer was wrong.
+ */
+describe('InfraDataController.importData rejects a malformed table value', () => {
+  const controller = () =>
+    new InfraDataController(new InfraDataService({ get: () => undefined } as never, {} as never));
+
+  it.each([
+    ['a string', 'not-an-array'],
+    ['a number', 7],
+    ['an object', { id: 'x' }],
+  ])('answers 400 when tables.sessions is %s', async (_label, value) => {
+    await expect(controller().importData({ tables: { sessions: value } } as never)).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  // Array.isArray alone let `[null]` through, and the RED comment above claimed this case was
+  // covered when it was not — the row then died on its first property read, the same 500 with a
+  // longer fuse.
+  it.each([
+    ['a null row', [null]],
+    ['a string row', ['nope']],
+    ['a nested array', [[]]],
+  ])('answers 400 for %s rather than dying on the first property read', async (_label, rows) => {
+    await expect(controller().importData({ tables: { sessions: rows } } as never)).rejects.toThrow(BadRequestException);
+  });
+
+  it('names the offending table so the operator can fix the file', async () => {
+    await expect(controller().importData({ tables: { messages: 'nope' } } as never)).rejects.toThrow(/messages/);
+  });
+
+  // Negative twin. It guards OVER-rejection, not deletion: a "must not reject" assertion can never
+  // fail when the guard is removed — that is what the four cases above are for. What it does catch is
+  // the guard hardening into refusing shapes the endpoint supports: an absent table (a partial
+  // archive) and an empty one (a table that legitimately has no rows).
+  it.each([
+    ['omits a table', { sessions: [{ id: 's1', name: 's1' }] }],
+    ['carries an empty table', { sessions: [{ id: 's1', name: 's1' }], messages: [] }],
+  ])('does not reject an archive that %s', async (_label, tables) => {
+    await expect(controller().importData({ tables } as never)).rejects.not.toThrow(/must be an array/);
+  });
+});
+
+// Plugin runtime bindings (activeSessions, per-session config) are projected from plugin_instances
+// rows and kept in the plugin registry, and the boot pass only adds. A restore that drops an instance
+// must retire its binding, or the plugin keeps firing on that session with the dropped config.
+describe('InfraDataController.importData re-syncs plugin instance bindings', () => {
+  let ds: DataSource;
+  const cfg = { get: (key: string, def?: unknown) => (key === 'dataDatabase.type' ? 'sqlite' : def) };
+
+  beforeEach(async () => {
+    ds = new DataSource({
+      type: 'better-sqlite3',
+      database: ':memory:',
+      entities: [
+        Session,
+        Webhook,
+        Message,
+        MessageBatch,
+        Template,
+        BaileysStoredMessage,
+        LidMapping,
+        ChatState,
+        PluginInstance,
+        ConversationMapping,
+        IngressEvent,
+        WebhookDeliveryFailure,
+        WebhookOutboxEvent,
+        IntegrationDeliveryFailure,
+        StatusUpdate,
+        AutomationRule,
+      ],
+      synchronize: true,
+    });
+    await ds.initialize();
+  });
+
+  afterEach(async () => {
+    await ds.destroy();
+  });
+
+  const seed = async () => {
+    const sessions = ds.getRepository(Session);
+    for (const id of ['sess-1', 'sess-2']) {
+      await sessions.save(
+        sessions.create({ id, name: `session-${id}`, status: SessionStatus.DISCONNECTED, config: {} }),
+      );
+    }
+    const instances = ds.getRepository(PluginInstance);
+    for (const [instanceId, sessionScope, token] of [
+      ['kept', 'sess-2', 'token-kept'],
+      ['dropped', 'sess-1', 'token-dropped'],
+    ]) {
+      await instances.save(
+        instances.create({
+          id: `chatwoot:${instanceId}`,
+          pluginId: 'chatwoot',
+          instanceId,
+          sessionScope,
+          secret: 's',
+          verifyToken: 'v',
+          config: { token },
+          enabled: true,
+        }),
+      );
+    }
+  };
+
+  /** A loader whose runtime state the resync really mutates, as the plugin registry would hold it. */
+  const statefulLoader = () => {
+    const plugin = {
+      manifest: { id: 'chatwoot' },
+      activeSessions: ['sess-1', 'sess-2'],
+      sessionConfig: { 'sess-1': { token: 'token-dropped' }, 'sess-2': { token: 'token-kept' } } as Record<
+        string,
+        unknown
+      >,
+    };
+    const loader = {
+      getPlugin: (id: string) => (id === 'chatwoot' ? plugin : undefined),
+      setPluginSessionConfig: (_id: string, scope: string, config: unknown) => {
+        plugin.sessionConfig = { ...plugin.sessionConfig, [scope]: config };
+      },
+      setPluginSessions: (_id: string, sessions: string[]) => {
+        plugin.activeSessions = sessions;
+      },
+      updatePluginConfig: jest.fn(),
+    };
+    return { plugin, loader };
+  };
+
+  const serviceWith = (moduleRef: unknown) =>
+    new InfraDataService(cfg as never, ds, undefined, undefined, undefined, undefined, undefined, moduleRef as never);
+
+  it('retires the binding of an instance the backup does not contain', async () => {
+    await seed();
+    const dump = await new InfraDataController(serviceWith(undefined)).exportData();
+    const tables = {
+      ...dump.tables,
+      pluginInstances: dump.tables.pluginInstances?.filter(row => row.instanceId !== 'dropped'),
+    };
+    const { plugin, loader } = statefulLoader();
+    const scopeBinding = new ScopeBindingService(
+      new PluginInstanceService(ds.getRepository(PluginInstance)),
+      loader as unknown as PluginLoaderService,
+      { logInfo: jest.fn(), logWarn: jest.fn() } as never,
+      ds.getRepository(Session),
+    );
+    const moduleRef = { get: jest.fn(() => scopeBinding) };
+
+    const res = await new InfraDataController(serviceWith(moduleRef)).importData({ tables });
+
+    expect(res.imported).toBe(true);
+    expect(res.restartRequired).toBe(false);
+    expect(moduleRef.get).toHaveBeenCalledWith(ScopeBindingService, { strict: false });
+    expect(plugin.activeSessions).toEqual(['sess-2']);
+    expect(plugin.sessionConfig).toEqual({ 'sess-1': {}, 'sess-2': { token: 'token-kept' } });
+  });
+
+  it('commits the import and reports a failed resync as a notice with restartRequired', async () => {
+    await seed();
+    const dump = await new InfraDataController(serviceWith(undefined)).exportData();
+    const resyncAfterImport = jest.fn().mockRejectedValue(new Error('registry write failed'));
+    const moduleRef = { get: () => ({ resyncAfterImport }) };
+
+    const res = await new InfraDataController(serviceWith(moduleRef)).importData({ tables: dump.tables });
+
+    expect(res.imported).toBe(true);
+    expect(res.restartRequired).toBe(true);
+    expect(res.notices.some(n => n.includes('registry write failed'))).toBe(true);
+    // The snapshot handed over is the pre-import state, read before the table was cleared.
+    expect(resyncAfterImport).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ pluginId: 'chatwoot', sessionScope: 'sess-1', enabled: true }),
+        expect.objectContaining({ pluginId: 'chatwoot', sessionScope: 'sess-2', enabled: true }),
+      ]),
+    );
   });
 });

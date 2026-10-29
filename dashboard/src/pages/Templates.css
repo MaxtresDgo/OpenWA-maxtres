@@ -4,7 +4,7 @@
   overflow-x: hidden;
 }
 
-.templates-page .templates-loading,
+.templates-page.templates-loading,
 .templates-page .templates-loading-inline,
 .templates-page .templates-empty-page,
 .templates-page .templates-empty-list {
@@ -13,12 +13,15 @@
   justify-content: center;
 }
 
-.templates-page .templates-loading {
+.templates-page.templates-loading {
   min-height: 400px;
 }
 
 .templates-page .templates-session-select {
   min-width: 240px;
+  /* A native select is as wide as its longest option, and a percentage width does not bound the header column
+     it sits in; only max-width does. A longer session name is cut inside the select, not over the title. */
+  max-width: 20rem;
 }
 
 .templates-page .templates-workspace {
@@ -42,7 +45,7 @@
 .templates-page .templates-library {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
   background: var(--bg-light);
 }
 
@@ -114,12 +117,36 @@
   font-size: 0.875rem;
 }
 
+.templates-page .templates-search:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
 .templates-page .template-list {
   display: flex;
   flex: 1;
   flex-direction: column;
   overflow-y: auto;
   padding: 0 0.5rem 1rem;
+}
+
+.templates-page .template-list-row {
+  position: relative;
+}
+
+.templates-page .template-list-row.deletable .template-list-item {
+  padding-inline-end: 2.75rem;
+}
+
+.templates-page .icon-btn.template-list-delete {
+  position: absolute;
+  top: 0.625rem;
+  inset-inline-end: 0.625rem;
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
 }
 
 .templates-page .template-list-item {
@@ -133,17 +160,26 @@
   border-radius: 8px;
   background: transparent;
   color: inherit;
-  text-align: left;
+  text-align: start;
 }
 
-.templates-page .template-list-item:hover {
+.templates-page .template-list-item:hover:where(:not(:disabled)) {
   border-color: var(--border);
   background: var(--bg-white);
+}
+
+.templates-page .template-list-item:disabled {
+  cursor: not-allowed;
 }
 
 .templates-page .template-list-item.selected {
   border-color: var(--primary);
   background: var(--primary-soft);
+}
+
+/* The muted gray is 4.17:1 on the selected row's tint. */
+.templates-page .template-list-item.selected .template-list-meta {
+  color: var(--text-secondary);
 }
 
 .templates-page .template-list-title {
@@ -168,7 +204,7 @@
 .templates-page .template-list-meta {
   overflow: hidden;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -244,7 +280,7 @@
 .templates-page .template-form textarea:focus,
 .templates-page .placeholder-list input:focus {
   outline: none;
-  border-color: var(--primary);
+  border-color: var(--focus-ring);
   background: var(--bg-white);
   box-shadow: 0 0 0 3px var(--primary-soft);
 }
@@ -261,7 +297,7 @@
 .templates-page .template-preview {
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
+  border-inline-start: 1px solid var(--border);
   background: var(--bg-light);
 }
 
@@ -275,7 +311,7 @@
   border: 1px solid var(--primary);
   border-radius: 999px;
   background: var(--primary-soft);
-  color: var(--primary);
+  color: var(--primary-text);
   font-size: 0.75rem;
   font-weight: 700;
 }
@@ -294,7 +330,7 @@
   border-radius: 8px;
   background: var(--bg-white);
   color: var(--text-primary);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.875rem;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -320,8 +356,8 @@
 }
 
 .templates-page .placeholder-list label > span {
-  color: var(--primary);
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--primary-text);
+  font-family: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
 }
 
 .templates-page .template-muted {
@@ -388,54 +424,11 @@
 .templates-page .icon-btn.danger:hover {
   border-color: rgba(239, 68, 68, 0.3);
   background: rgba(239, 68, 68, 0.12);
-  color: var(--error);
+  color: var(--error-text);
 }
 
-.templates-page .toast {
-  position: fixed;
-  top: 1.5rem;
-  right: 1.5rem;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 1rem 1.25rem;
-  border-radius: 8px;
-  box-shadow: var(--shadow-lg);
-  font-size: 0.875rem;
-  font-weight: 500;
-}
-
-.templates-page .toast.success {
-  border: 1px solid rgba(37, 211, 102, 0.3);
-  background: rgba(37, 211, 102, 0.12);
-  color: var(--success);
-}
-
-.templates-page .toast.error {
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--error);
-}
-
-.templates-page .toast-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  opacity: 0.7;
-}
-
-.templates-page .toast-close:hover {
-  opacity: 1;
-}
-
-@media (max-width: 1280px) {
+/* Three columns need 1286px of viewport with the sidebar open. */
+@media (max-width: 1290px) {
   .templates-page .templates-workspace {
     grid-template-columns: 280px minmax(380px, 1fr);
   }
@@ -445,7 +438,7 @@
     display: grid;
     grid-template-columns: 1fr 320px;
     border-top: 1px solid var(--border);
-    border-left: 0;
+    border-inline-start: 0;
   }
 
   .templates-page .template-preview-header {
@@ -454,6 +447,31 @@
 
   .templates-page .template-variable-panel {
     padding-top: 1rem;
+  }
+}
+
+/* Stacked below 1000px: two columns need 984px of viewport with the sidebar open. */
+@media (max-width: 1000px) {
+  .templates-page .templates-workspace {
+    display: flex;
+    flex-direction: column;
+    min-height: auto;
+  }
+
+  .templates-page .templates-library {
+    max-height: 360px;
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .templates-page .template-editor-header,
+  .templates-page .templates-library-header,
+  .templates-page .template-preview-header {
+    min-height: auto;
+  }
+
+  .templates-page .template-preview {
+    display: flex;
   }
 }
 
@@ -466,27 +484,12 @@
     min-width: 0;
     width: 100%;
   }
+}
 
-  .templates-page .templates-workspace {
-    display: flex;
-    flex-direction: column;
-    min-height: auto;
-  }
-
-  .templates-page .templates-library {
-    max-height: 360px;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .templates-page .template-editor-header,
-  .templates-page .templates-library-header,
-  .templates-page .template-preview-header {
-    min-height: auto;
-  }
-
-  .templates-page .template-preview {
-    display: flex;
+/* The page header is one column from here, so the select has no title beside it to cover. */
+@media (max-width: 768px) {
+  .templates-page .templates-session-select {
+    max-width: none;
   }
 }
 

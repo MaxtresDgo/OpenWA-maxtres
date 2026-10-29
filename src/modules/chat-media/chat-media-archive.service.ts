@@ -1,10 +1,14 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
-import { In, IsNull, LessThan, Not, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { Message } from '../message/entities/message.entity';
+import { updateMessageMetadata } from '../message/message-metadata';
 import { StorageService } from '../../common/storage/storage.service';
+import { sweepOrphanedFiles } from '../../common/storage/orphan-sweep';
+import { startGuardedInterval } from '../../common/utils/guarded-interval';
+import { extFromMimetype } from '../../common/media/mime-ext';
 import { createLogger } from '../../common/services/logger.service';
 
 /** Storage key prefix owned by the chat-media archive; the media bucket is shared with statuses. */
@@ -27,15 +31,10 @@ const PURGE_MAX_BATCHES_PER_RUN = 200;
 /** Archive keys reconciled per orphan-sweep query — bounds peak memory independently of store size. */
 const SWEEP_CHUNK_SIZE = 500;
 
-/** Subtypes whose registered mimetype name differs from the conventional file extension. */
-const MIME_SUBTYPE_EXT_OVERRIDES: Record<string, string> = { jpeg: 'jpg', quicktime: 'mov' };
-
-/** File extension to store a blob under, derived from its mimetype; 'bin' when unrecognized. */
-function extFromMimetype(mimetype: string): string {
-  const subtype = mimetype.split('/')[1]?.split(';')[0]?.trim().toLowerCase();
-  if (!subtype || !/^[a-z0-9]+$/.test(subtype)) return 'bin';
-  return MIME_SUBTYPE_EXT_OVERRIDES[subtype] ?? subtype;
-}
+/** `metadata.media.data` holding a remote URL (a URL-based send) rather than base64 bytes. */
+const MEDIA_URL_POINTER = /^https?:\/\//i;
+/** Largest stored metadata the purge reads for an archived marker; a row with inline base64 is far above it. */
+const ARCHIVED_MARKER_MAX_METADATA_BYTES = 64 * 1024;
 
 /** The inline media shape carried on a persisted row's `metadata.media`. */
 interface InlineMedia {
@@ -49,22 +48,29 @@ interface InlineMedia {
  * Archives chat-message media to the file store so it stays retrievable after delivery, independent
  * of the inline base64 copy the message row already carries.
  *
- * Opt-in (`CHAT_MEDIA_ARCHIVE_ENABLED`, default off) because it doubles storage for media under the
- * cap: the inline copy is deliberately left in place, since the dashboard renders from it and
- * stripping it would break the response contract.
+ * Opt-in (`CHAT_MEDIA_ARCHIVE_ENABLED`, default off) because, by default, it doubles storage for
+ * media under the cap: the inline copy is left in place, since the dashboard renders from it.
+ * `MESSAGE_INLINE_MEDIA=archive` changes that: once a file is stored, read back intact and the row
+ * points at it, the row's inline copy is replaced with the omitted marker (`omitted: true`,
+ * `archived: true`), so the bytes are kept once and served by the media route. Any failure along
+ * the way leaves the inline copy, so the mode can lose a saving but never the media.
  *
- * Two recurring sweeps run only while archiving is enabled: a retention purge (when
- * `CHAT_MEDIA_ARCHIVE_TTL_DAYS` is non-zero) that clears files past their TTL along with the
- * columns pointing at them, and an hourly reconciliation sweep that reaps files no row references —
- * the crash leftovers of the narrow window between a file write and its row update.
+ * Two recurring sweeps run regardless of that flag, which gates the writer rather than the store: a
+ * retention purge (when `CHAT_MEDIA_ARCHIVE_TTL_DAYS` is non-zero) that clears files past their TTL
+ * along with the columns pointing at them, and an hourly reconciliation sweep that reaps files no
+ * row references — the crash leftovers of the narrow window between a file write and its row
+ * update. Files and pointers written while the flag was on outlive it being turned off, so the
+ * maintenance they need does not stop with the writer.
  */
 @Injectable()
 export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = createLogger('ChatMediaArchiveService');
-  private purgeTimer?: ReturnType<typeof setInterval>;
-  private orphanSweepTimer?: ReturnType<typeof setInterval>;
+  /** Stops the retention purge and the orphan sweep; set while the service is running. */
+  private stopMaintenance: Array<() => void> = [];
   /** First sweep sighting (epoch ms) of each unreferenced archive file, for the grace window. */
   private readonly orphanFirstSeenAt = new Map<string, number>();
+  /** Last row id the retention purge walked past; the next run resumes after it. */
+  private purgeCursor?: string;
 
   constructor(
     @InjectRepository(Message, 'data')
@@ -77,37 +83,33 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
     return this.configService.get<boolean>('chatMedia.archiveEnabled', false);
   }
 
+  /** MESSAGE_INLINE_MEDIA=archive: an archived file replaces the row's inline copy. */
+  get replacesInline(): boolean {
+    return this.configService.get<'inline' | 'archive'>('chatMedia.inlineMode', 'inline') === 'archive';
+  }
+
   onModuleInit(): void {
-    // Both sweeps exist only to maintain archived files. With archiving off no row can hold a
-    // mediaPath, so scheduling them would be a recurring no-op walk of the store.
-    if (!this.enabled) return;
-
-    const runPurge = (): void => {
-      this.purgeExpired(Date.now()).catch(err =>
-        this.logger.error('Chat media purge failed', err instanceof Error ? err.stack : String(err)),
-      );
-    };
-    runPurge(); // sweep once at startup
-    this.purgeTimer = setInterval(runPurge, PURGE_INTERVAL_MS);
-    this.purgeTimer.unref?.();
-
-    const runOrphanSweep = (): void => {
-      this.sweepOrphanedMedia(Date.now()).catch(err =>
-        this.logger.error('Chat media orphan sweep failed', err instanceof Error ? err.stack : String(err)),
-      );
-    };
-    runOrphanSweep(); // the first pass only records first-seen; nothing is deleted before the grace window
+    const failed = (what: string) => (err: unknown) =>
+      this.logger.error(`${what} failed`, err instanceof Error ? err.stack : String(err));
     const sweepIntervalMs = this.configService.get<number>(
       'chatMedia.orphanSweepIntervalMs',
       DEFAULT_ORPHAN_SWEEP_INTERVAL_MS,
     );
-    this.orphanSweepTimer = setInterval(runOrphanSweep, sweepIntervalMs);
-    this.orphanSweepTimer.unref?.();
+    this.stopMaintenance = [
+      // Once at startup, then on a timer; a pass that outlasts its interval is not stacked on.
+      startGuardedInterval(() => this.purgeExpired(Date.now()), PURGE_INTERVAL_MS, failed('Chat media purge')),
+      // The first pass only records first-seen; nothing is deleted before the grace window.
+      startGuardedInterval(
+        () => this.sweepOrphanedMedia(Date.now()),
+        sweepIntervalMs,
+        failed('Chat media orphan sweep'),
+      ),
+    ];
   }
 
   onModuleDestroy(): void {
-    if (this.purgeTimer) clearInterval(this.purgeTimer);
-    if (this.orphanSweepTimer) clearInterval(this.orphanSweepTimer);
+    for (const stop of this.stopMaintenance) stop();
+    this.stopMaintenance = [];
   }
 
   /**
@@ -121,14 +123,24 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
    * Never throws: archiving is a side benefit of receiving a message, and a storage hiccup must not
    * surface on the receive path. Returns the storage key when a file was written.
    */
-  async archive(row: Pick<Message, 'id' | 'sessionId' | 'metadata'>): Promise<string | null> {
+  async archive(row: Pick<Message, 'id' | 'sessionId' | 'metadata' | 'mediaPath'>): Promise<string | null> {
     if (!this.enabled) return null;
+    // Outbound rows have two possible writers (the REST/bulk persist and the engine echo), so the
+    // same row can reach here twice. A second write would leave the first file referenced by
+    // nothing but still inside the grace window — work and storage for no gain.
+    if (row.mediaPath) return null;
 
     const media = (row.metadata as { media?: InlineMedia } | null | undefined)?.media;
     if (!media?.data || media.omitted || !media.mimetype) return null;
+    // A URL-based send stores the URL STRING as `data`, not bytes. `Buffer.from(url, 'base64')`
+    // does not throw — it yields ~18 bytes of noise — and the read endpoint consults the archive
+    // BEFORE the inline copy, so archiving one would serve garbage in place of the correct 404.
+    // Same discriminator the send path and the export controller already apply to this value.
+    if (MEDIA_URL_POINTER.test(media.data)) return null;
 
     const maxBytes = this.configService.get<number>('chatMedia.maxBytes', DEFAULT_ARCHIVE_MAX_BYTES);
-    const sizeBytes = media.sizeBytes ?? Buffer.byteLength(media.data, 'base64');
+    // Measure decoded bytes; a plugin or imported row may supply an incorrect sizeBytes.
+    const sizeBytes = Buffer.byteLength(media.data, 'base64');
     if (sizeBytes > maxBytes) return null;
 
     // A random key rather than the WhatsApp message id: message ids are engine-controlled strings
@@ -136,8 +148,9 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
     // id into S3 keys. The row is read on the way out anyway, so nothing is gained by a derivable
     // key. Mirrors the status store.
     const key = `${CHAT_MEDIA_PREFIX}${row.sessionId}/${randomUUID()}.${extFromMimetype(media.mimetype)}`;
+    const bytes = Buffer.from(media.data, 'base64');
     try {
-      await this.storageService.putFile(key, Buffer.from(media.data, 'base64'));
+      await this.storageService.putFile(key, bytes);
     } catch (error) {
       this.logger.error(
         `Failed to archive chat media for session ${row.sessionId}, message ${row.id}`,
@@ -147,13 +160,62 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await this.repository.update({ id: row.id }, { mediaPath: key, mediaMimetype: media.mimetype });
+      let result;
+      if (this.replacesInline) {
+        const stored = await this.storageService.getFile(key);
+        if (!stored.equals(bytes)) throw new Error('Archived media did not read back intact');
+        const current = await this.repository.findOne({
+          where: { id: row.id, mediaPath: IsNull(), type: Not('revoked') },
+          select: { id: true, metadata: true, waMessageId: true },
+        });
+        const metadata = current?.metadata;
+        const currentMedia = (metadata as { media?: InlineMedia } | null | undefined)?.media;
+        // The media route needs a WhatsApp id. An id-less send must keep its inline bytes.
+        if (!current?.waMessageId || !currentMedia?.data || currentMedia.data !== media.data) {
+          await this.storageService.deleteFile(key).catch(() => undefined);
+          return null;
+        }
+        const { data: _data, ...rest } = currentMedia;
+        void _data;
+        // Publish the verified pointer and remove only the exact metadata snapshot we read.
+        // A concurrent reaction, edit or revoke wins instead of being overwritten.
+        result = await this.repository
+          .createQueryBuilder()
+          .update()
+          .set({
+            mediaPath: key,
+            mediaMimetype: media.mimetype,
+            metadata: {
+              ...metadata,
+              media: { ...rest, omitted: true, sizeBytes: bytes.length, archived: true },
+            },
+          })
+          .where({ id: row.id, type: Not('revoked'), mediaPath: IsNull() })
+          .andWhere('"metadata" = :snapshot', { snapshot: JSON.stringify(metadata) })
+          .execute();
+      } else {
+        // Conditional on the row not being revoked: a revoke that landed while the file was written
+        // cleared the row, and pointing it at the file would bring the deleted media back. And on no
+        // pointer yet: the other writer may have passed the snapshot guard above while this file was
+        // being written, and the first pointer wins so the losing file is deleted, not stranded.
+        result = await this.repository.update(
+          { id: row.id, type: Not('revoked'), mediaPath: IsNull() },
+          { mediaPath: key, mediaMimetype: media.mimetype },
+        );
+      }
+      if (result.affected === 0) {
+        await this.storageService.deleteFile(key).catch(() => undefined); // else the orphan sweep reaps it
+        return null;
+      }
     } catch (error) {
       // The file exists but no row references it — an orphan the sweep reaps after its grace
       // window. The row itself stays consistent (mediaPath still null), so nothing else to undo.
-      this.logger.warn(`Chat media ${key} written but the row update failed; leaving it for the orphan sweep`, {
-        error: String(error),
-      });
+      this.logger.warn(
+        `Chat media ${key} written but not published; keeping inline media and leaving the file for the orphan sweep`,
+        {
+          error: String(error),
+        },
+      );
       return null;
     }
     return key;
@@ -165,11 +227,15 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
    */
   async getMedia(
     sessionId: string,
-    chatId: string,
+    chatIds: string[],
     waMessageId: string,
   ): Promise<{ path: string; mimetype: string } | null> {
-    const row = await this.repository.findOne({ where: { sessionId, chatId, waMessageId } });
-    if (!row?.mediaPath || !row.mediaMimetype) return null;
+    // Candidates rather than one id: an outbound row stores the caller's literal chatId or the
+    // engine-neutral form depending on which writer won the persist race. The caller owns the
+    // dialect resolution (it holds the lid table), so this only has to match any of them.
+    const row = await this.repository.findOne({ where: { sessionId, chatId: In(chatIds), waMessageId } });
+    // A revoked row serves nothing, whatever pointer it still holds.
+    if (!row?.mediaPath || !row.mediaMimetype || row.type === 'revoked') return null;
     return { path: row.mediaPath, mimetype: row.mediaMimetype };
   }
 
@@ -190,20 +256,36 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
     let cleared = 0;
 
     // Batched, not one pass. The archive's default TTL is 0 (keep forever), so the first run after
-    // an operator sets a retention can face an arbitrarily large backlog — unlike the status store,
-    // whose 24h TTL bounds every batch by construction. Unbatched that backlog broke three ways at
-    // once: tens of thousands of concurrent deletes, and a single `UPDATE ... WHERE id IN (...)`
-    // past the driver's bind-parameter ceiling (SQLite 32766, Postgres 65535) that throws AFTER the
-    // files are already gone — leaving rows pointing at deleted files, and every later tick
-    // repeating the same failure. Draining in bounded batches keeps each statement small and makes
-    // partial progress durable.
+    // an operator sets a retention can face an arbitrarily large backlog. Unbatched that backlog
+    // broke three ways at once: tens of thousands of concurrent deletes, and a single
+    // `UPDATE ... WHERE id IN (...)` past the driver's bind-parameter ceiling (SQLite 32766, Postgres
+    // 65535) that throws AFTER the files are already gone, leaving rows pointing at deleted files and
+    // every later tick repeating the same failure. Draining in bounded batches keeps each statement
+    // small and makes partial progress durable. The batches walk the rows by id, resuming across runs,
+    // so rows whose delete keeps failing are stepped over instead of being re-selected ahead of every
+    // newer row. A batch in which every delete fails ends the run: a missing file already counts as
+    // deleted, so that means the store is down, and walking on would only repeat the failure.
+    //
+    // On SQLite the walk orders by `+id`: a bare `id` lets the planner satisfy ORDER BY from the
+    // primary-key autoindex and visit every row of the table, even with nothing to purge, and
+    // better-sqlite3 runs that scan on the event loop. The unary plus starts the plan from the
+    // createdAt range instead. Postgres rejects unary plus on a uuid and plans this well as it is.
+    const isSqlite = ['sqlite', 'better-sqlite3'].includes(this.repository.manager.connection.options.type);
+    let after = this.purgeCursor;
+    this.purgeCursor = undefined;
     for (let batch = 0; batch < PURGE_MAX_BATCHES_PER_RUN; batch++) {
-      const expired = await this.repository.find({
-        where: { mediaPath: Not(IsNull()), createdAt: LessThan(cutoff) },
-        select: { id: true, mediaPath: true },
-        take: PURGE_BATCH_SIZE,
-      });
+      const qb = this.repository
+        .createQueryBuilder('m')
+        .select(['m.id', 'm.mediaPath'])
+        .where('m.mediaPath IS NOT NULL')
+        .andWhere('m.createdAt < :cutoff', { cutoff });
+      if (after) qb.andWhere('m.id > :after', { after });
+      const expired = await qb
+        .orderBy(isSqlite ? '+m.id' : 'm.id', 'ASC')
+        .limit(PURGE_BATCH_SIZE)
+        .getMany();
       if (expired.length === 0) break;
+      after = expired[expired.length - 1].id;
 
       const clearableIds: string[] = [];
       for (const row of expired) {
@@ -217,22 +299,67 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // Every delete in the batch failed: the same rows would be re-selected forever, so stop
-      // rather than spin. The next scheduled run retries them.
-      if (clearableIds.length === 0) break;
+      if (clearableIds.length === 0) {
+        this.purgeCursor = after;
+        break;
+      }
+      // Rows whose delete failed keep their columns; they are retried once the walk wraps around. So does a row
+      // whose archived marker could not be dropped, which the next run then retries with the file already gone.
+      const markerKept = await this.dropArchivedMarkers(clearableIds);
+      const clearedIds = clearableIds.filter(id => !markerKept.has(id));
+      if (clearedIds.length > 0) {
+        await this.repository.update(clearedIds, {
+          mediaPath: null as unknown as undefined,
+          mediaMimetype: null as unknown as undefined,
+        });
+      }
+      cleared += clearedIds.length;
 
-      await this.repository.update(clearableIds, {
-        mediaPath: null as unknown as undefined,
-        mediaMimetype: null as unknown as undefined,
-      });
-      cleared += clearableIds.length;
-
-      // A short batch means the backlog is drained; anything else costs an extra empty query.
+      // A short batch means the backlog is drained and the next run starts over from the lowest id;
+      // a run that hits the batch cap resumes where it stopped.
       if (expired.length < PURGE_BATCH_SIZE) break;
+      if (batch === PURGE_MAX_BATCHES_PER_RUN - 1) this.purgeCursor = after;
     }
 
     if (cleared > 0) this.logger.log(`Chat media retention purge cleared ${cleared} file(s)`);
     return cleared;
+  }
+
+  /**
+   * Under MESSAGE_INLINE_MEDIA=archive a row also points at its file through `metadata.media.archived`, which a
+   * client reads as "the bytes are behind the media route". Drop it once the file is gone, through the same
+   * compare-and-set every metadata writer uses, so a reaction written meanwhile survives. Only a small metadata
+   * can carry the marker (an archive-only row holds no base64), and the size is checked first, so the inline
+   * copies of the default mode are never read. Returns the ids whose marker is still there.
+   */
+  private async dropArchivedMarkers(ids: string[]): Promise<Set<string>> {
+    const marked = await this.repository
+      .createQueryBuilder('m')
+      .select('m.id', 'id')
+      .where('m.id IN (:...ids)', { ids })
+      .andWhere('CASE WHEN OCTET_LENGTH(m.metadata) <= :maxBytes THEN m.metadata LIKE :marker ELSE FALSE END', {
+        maxBytes: ARCHIVED_MARKER_MAX_METADATA_BYTES,
+        marker: '%"archived":true%',
+      })
+      .getRawMany<{ id: string }>();
+    const kept = new Set<string>();
+    for (const { id } of marked) {
+      try {
+        await updateMessageMetadata(this.repository, { id }, metadata => {
+          const media = metadata.media as Record<string, unknown> | undefined;
+          if (!media || !('archived' in media)) return metadata;
+          const { archived: _archived, ...rest } = media;
+          void _archived;
+          return { ...metadata, media: rest };
+        });
+      } catch (error) {
+        kept.add(id);
+        this.logger.warn(`Failed to drop the archived marker of message ${id}; keeping its row for the next sweep`, {
+          error: String(error),
+        });
+      }
+    }
+    return kept;
   }
 
   /**
@@ -246,54 +373,24 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
    */
   async sweepOrphanedMedia(now: number = Date.now()): Promise<number> {
     const graceMs = this.configService.get<number>('chatMedia.orphanGraceMs', DEFAULT_ORPHAN_GRACE_MS);
-    let removed = 0;
-    // Keys still unreferenced at the end of THIS pass. Bounded by the orphan count (normally ~0),
-    // not by the size of the store, so it can safely drive the bookkeeping prune below.
-    const stillOrphaned = new Set<string>();
-
-    // Reconciled in chunks rather than as two whole-store sets. iterateFiles streams (listFiles
-    // truncates at STORAGE_LIST_MAX_FILES, which would strand every orphan past the cap), but
-    // collecting every key AND every archived row into memory would undo that: with the default
-    // TTL of 0 the archive grows without bound, so a mature gateway would spend an hourly spike
-    // holding millions of key strings. Each chunk asks the DB only which of ITS keys are
-    // referenced — an indexed lookup over a bounded id list.
-    let chunk: string[] = [];
-    const flush = async (): Promise<void> => {
-      if (chunk.length === 0) return;
-      const rows = await this.repository.find({ where: { mediaPath: In(chunk) }, select: { mediaPath: true } });
-      const referenced = new Set(rows.map(row => row.mediaPath));
-      for (const file of chunk) {
-        if (referenced.has(file)) {
-          this.orphanFirstSeenAt.delete(file);
-          continue;
-        }
-        stillOrphaned.add(file);
-        const firstSeenAt = this.orphanFirstSeenAt.get(file) ?? now;
-        this.orphanFirstSeenAt.set(file, firstSeenAt);
-        if (now - firstSeenAt < graceMs) continue;
-        try {
-          await this.storageService.deleteFile(file);
-          this.orphanFirstSeenAt.delete(file);
-          stillOrphaned.delete(file);
-          removed += 1;
-        } catch (err) {
-          this.logger.warn(`Failed to delete orphaned chat media ${file}`, { error: String(err) });
-        }
-      }
-      chunk = [];
-    };
-
-    for await (const file of this.storageService.iterateFiles(CHAT_MEDIA_PREFIX)) {
-      if (!file.startsWith(CHAT_MEDIA_PREFIX)) continue;
-      chunk.push(file);
-      if (chunk.length >= SWEEP_CHUNK_SIZE) await flush();
-    }
-    await flush();
-    // Drop bookkeeping for anything not still orphaned this pass — the file is gone, or a row now
-    // references it. Keyed off the orphan set rather than a full listing so this stays bounded too.
-    for (const key of [...this.orphanFirstSeenAt.keys()]) {
-      if (!stillOrphaned.has(key)) this.orphanFirstSeenAt.delete(key);
-    }
+    // Reconciled in chunks rather than as two whole-store sets: with the default TTL of 0 the
+    // archive grows without bound, so collecting every key AND every archived row into memory would
+    // turn the hourly sweep into a memory spike. Each chunk asks the DB only which of ITS keys are
+    // referenced — an indexed lookup over a bounded key list.
+    const removed = await sweepOrphanedFiles({
+      storage: this.storageService,
+      prefix: CHAT_MEDIA_PREFIX,
+      graceMs,
+      now,
+      firstSeenAt: this.orphanFirstSeenAt,
+      chunkSize: SWEEP_CHUNK_SIZE,
+      referencedAmong: async keys => {
+        const rows = await this.repository.find({ where: { mediaPath: In(keys) }, select: { mediaPath: true } });
+        return new Set(rows.map(row => row.mediaPath));
+      },
+      onDeleteFailed: (file, err) =>
+        this.logger.warn(`Failed to delete orphaned chat media ${file}`, { error: String(err) }),
+    });
     if (removed > 0) this.logger.log(`Chat media orphan sweep removed ${removed} file(s)`);
     return removed;
   }

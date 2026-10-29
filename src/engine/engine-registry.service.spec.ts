@@ -46,6 +46,50 @@ describe('EngineRegistry', () => {
       expect(registry.entries()).toEqual([]);
     });
 
+    /**
+     * The proxy travels with the engine because it is fixed for that engine's life: `PATCH /proxy`
+     * edits the row without restarting, so a fetch made for a running session has to use what the
+     * engine was started with rather than what the row now says (#1626).
+     */
+    describe('the egress proxy of the live engine', () => {
+      it('remembers the proxy the engine was registered with', () => {
+        registry.set('s1', engineStub('a'), 'socks5://proxy.invalid:1080');
+
+        expect(registry.proxyUrl('s1')).toBe('socks5://proxy.invalid:1080');
+      });
+
+      it('reports no proxy for a direct session and for one that was never started', () => {
+        registry.set('s1', engineStub('a'));
+
+        expect(registry.proxyUrl('s1')).toBeUndefined();
+        expect(registry.proxyUrl('never-started')).toBeUndefined();
+      });
+
+      it('takes the new proxy when a reconnect replaces the engine', () => {
+        registry.set('s1', engineStub('first'), 'http://old.invalid:8080');
+        registry.set('s1', engineStub('second'), 'socks5://new.invalid:1080');
+
+        expect(registry.proxyUrl('s1')).toBe('socks5://new.invalid:1080');
+      });
+
+      it('forgets it on delete, deleteIfLive and clear, so a stopped session keeps no egress', () => {
+        const live = engineStub('live');
+        registry.set('s1', engineStub('a'), 'http://a.invalid:8080');
+        registry.delete('s1');
+        expect(registry.proxyUrl('s1')).toBeUndefined();
+
+        registry.set('s2', live, 'http://b.invalid:8080');
+        registry.deleteIfLive('s2', engineStub('superseded'));
+        expect(registry.proxyUrl('s2')).toBe('http://b.invalid:8080'); // not the live engine: kept
+        registry.deleteIfLive('s2', live);
+        expect(registry.proxyUrl('s2')).toBeUndefined();
+
+        registry.set('s3', engineStub('c'), 'http://c.invalid:8080');
+        registry.clear();
+        expect(registry.proxyUrl('s3')).toBeUndefined();
+      });
+    });
+
     it('entries() snapshots the map so callers can tear down while it mutates', () => {
       const a = engineStub('a');
       registry.set('s1', a);
@@ -161,6 +205,50 @@ describe('EngineRegistry', () => {
       registry.initializing.add('starting');
 
       expect(registry.activeIds().sort()).toEqual(['running', 'starting']);
+    });
+  });
+
+  describe('onRetire', () => {
+    // The projector releases what a retired engine's messages hold from here, so every path that
+    // ends an engine's life must report it, and only those.
+    const retired = (): Array<[string, unknown]> => {
+      const seen: Array<[string, unknown]> = [];
+      registry.onRetire((id, engine) => seen.push([id, (engine as unknown as { tag: string }).tag]));
+      return seen;
+    };
+
+    it('fires for delete, deleteIfLive and clear, after the map changed', () => {
+      const seen = retired();
+      let liveDuringListener: boolean | undefined;
+      const a = engineStub('a');
+      registry.set('s1', a);
+      registry.onRetire(id => (liveDuringListener = registry.has(id)));
+      registry.delete('s1');
+      registry.set('s2', engineStub('b'));
+      registry.deleteIfLive('s2', engineStub('stale'));
+      registry.deleteIfLive('s2', registry.get('s2')!);
+      registry.set('s3', engineStub('c'));
+      registry.set('s4', engineStub('d'));
+      registry.clear();
+      registry.delete('missing');
+
+      expect(seen).toEqual([
+        ['s1', 'a'],
+        ['s2', 'b'],
+        ['s3', 'c'],
+        ['s4', 'd'],
+      ]);
+      expect(liveDuringListener).toBe(false);
+    });
+
+    it('fires for a set that replaces a different engine, not for one that re-registers the same', () => {
+      const seen = retired();
+      const first = engineStub('first');
+      registry.set('s1', first);
+      registry.set('s1', first);
+      registry.set('s1', engineStub('second'));
+
+      expect(seen).toEqual([['s1', 'first']]);
     });
   });
 });

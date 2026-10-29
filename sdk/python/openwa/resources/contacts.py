@@ -5,7 +5,7 @@ Backed by ``src/modules/contact/contact.controller.ts``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import List, TYPE_CHECKING, TypedDict
 
 from .._http import quote_segment
 from ..types import (
@@ -31,13 +31,14 @@ class ContactsResource:
     def __init__(self, http: "HttpExecutor") -> None:
         self._http = http
 
-    def list(self, session_id: str, query: ListContactsQuery | None = None) -> list[ContactRecord]:
+    def list(self, session_id: str, query: ListContactsQuery | None = None) -> List[ContactRecord]:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts", query=query)
 
     def get(self, session_id: str, contact_id: str) -> ContactRecord:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}")
 
     def check(self, session_id: str, number: str) -> CheckNumberResponse:
+        """Check whether a number is on WhatsApp (OPERATOR)."""
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/check/{quote_segment(number)}")
 
     def profile_picture(self, session_id: str, contact_id: str) -> ProfilePictureResponse:
@@ -45,7 +46,7 @@ class ContactsResource:
             "GET", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/profile-picture"
         )
 
-    def profile_pictures(self, session_id: str, ids: list[str]) -> ProfilePicturesResponse:
+    def profile_pictures(self, session_id: str, ids: List[str]) -> ProfilePicturesResponse:
         """Batch-resolve profile picture URLs for up to 50 contacts in one request.
         Returns a map of contact id → URL (None when a lookup fails)."""
         return self._http.request(
@@ -56,6 +57,7 @@ class ContactsResource:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/phone")
 
     def block(self, session_id: str, contact_id: str) -> SuccessResult:
+        """Block a contact (OPERATOR)."""
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/block")
 
     def upsert(self, session_id: str, contact_id: str, body: UpsertContactRequest) -> SuccessResult:
@@ -71,4 +73,13 @@ class ContactsResource:
         )
 
     def unblock(self, session_id: str, contact_id: str) -> SuccessResult:
+        """Unblock a contact (OPERATOR)."""
         return self._http.request("DELETE", f"/api/sessions/{quote_segment(session_id)}/contacts/{quote_segment(contact_id)}/block")
+
+    def list_blocked(self, session_id: str) -> List[str]:
+        """List the JIDs this account has blocked.
+
+        Session-wide, so it takes no contact id — unlike ``block`` and ``unblock``, which act on one
+        contact. Returns a bare list of ids, not contact records.
+        """
+        return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/contacts/blocked")

@@ -7,6 +7,7 @@ import {
   GROUP_PARTICIPANTS_MAX,
 } from '../../../modules/group/dto/group.dto';
 import { defineTool, type AnyToolDescriptor } from '../tool-descriptor';
+import { paginate } from '../../../common/utils/paginate';
 
 const sessionId = z.string().min(1).describe('Session UUID (the session id, not the name)');
 
@@ -14,6 +15,7 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
   return [
     defineTool({
       name: 'GroupFindAll',
+      chatScope: 'filtered',
       description: 'List all groups the session is a member of. Use limit/offset to page.',
       tier: 'read',
       sessionScoped: true,
@@ -22,27 +24,37 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
         limit: z.number().int().min(1).max(1000).optional(),
         offset: z.number().int().min(0).optional(),
       }),
-      handler: input => group.getGroups(input.sessionId, { limit: input.limit, offset: input.offset }),
+      handler: async (input, apiKey, chatScope) => {
+        if (!chatScope?.isRestricted(apiKey)) {
+          return group.getGroups(input.sessionId, { limit: input.limit, offset: input.offset });
+        }
+        const visible = await chatScope.filter(apiKey, await group.listGroups(input.sessionId), item => item.id);
+        return paginate(visible, input.limit, input.offset);
+      },
     }),
     defineTool({
       name: 'GroupFindOne',
+      chatScope: ['groupId'],
       description: 'Get detailed info for a specific group including participants list.',
       tier: 'read',
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        groupId: z.string().describe('Group JID (e.g. 120363xxx@g.us)'),
+        groupId: z.string().min(1).describe('Group JID (e.g. 120363xxx@g.us)'),
       }),
       handler: input => group.getGroupInfo(input.sessionId, input.groupId),
     }),
     defineTool({
       name: 'GroupGetInviteCode',
-      description: 'Get the invite code and link for a group.',
+      description:
+        'Get the invite code and link for a group. Requires OPERATOR role: the code is a ' +
+        'transferable join capability, not plain read data.',
       tier: 'read',
+      requiredRole: ApiKeyRole.OPERATOR,
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        groupId: z.string().describe('Group JID (e.g. 120363xxx@g.us)'),
+        groupId: z.string().min(1).describe('Group JID (e.g. 120363xxx@g.us)'),
       }),
       handler: async input => {
         const inviteCode = await group.getGroupInviteCode(input.sessionId, input.groupId);
@@ -51,7 +63,9 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
     }),
     defineTool({
       name: 'GroupCreate',
-      description: 'Create a new WhatsApp group with a name and initial participants. Requires OPERATOR role.',
+      description:
+        'Create a new WhatsApp group with a name and initial participants. ' +
+        'Requires the Baileys engine; whatsapp-web.js answers 501 and a retry cannot succeed. Requires OPERATOR role.',
       tier: 'write',
       requiredRole: ApiKeyRole.OPERATOR,
       sessionScoped: true,
@@ -75,7 +89,7 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        groupId: z.string().describe('Group JID (e.g. 120363xxx@g.us)'),
+        groupId: z.string().min(1).describe('Group JID (e.g. 120363xxx@g.us)'),
         participants: z
           .array(z.string())
           .min(1)
@@ -100,6 +114,7 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
     }),
     defineTool({
       name: 'GroupSetSubject',
+      chatScope: ['groupId'],
       description: 'Change the group name/subject. Requires OPERATOR role.',
       tier: 'write',
       destructive: true,
@@ -107,7 +122,7 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        groupId: z.string().describe('Group JID (e.g. 120363xxx@g.us)'),
+        groupId: z.string().min(1).describe('Group JID (e.g. 120363xxx@g.us)'),
         subject: z.string().min(1).max(GROUP_NAME_MAX_LENGTH).describe('New group subject/name'),
       }),
       handler: async input => {
@@ -117,6 +132,7 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
     }),
     defineTool({
       name: 'GroupSetDescription',
+      chatScope: ['groupId'],
       description: 'Change the group description. Pass empty string to clear it. Requires OPERATOR role.',
       tier: 'write',
       destructive: true,
@@ -124,7 +140,7 @@ export function groupTools(group: GroupService): AnyToolDescriptor[] {
       sessionScoped: true,
       inputSchema: z.object({
         sessionId,
-        groupId: z.string().describe('Group JID (e.g. 120363xxx@g.us)'),
+        groupId: z.string().min(1).describe('Group JID (e.g. 120363xxx@g.us)'),
         description: z
           .string()
           .max(GROUP_DESCRIPTION_MAX_LENGTH)

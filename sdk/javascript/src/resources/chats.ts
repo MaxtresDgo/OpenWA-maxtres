@@ -12,9 +12,13 @@ import { encodeSegment } from '../http.js';
 import type { OpenWAClient } from '../client.js';
 import type {
   ArchiveChatRequest,
+  PinChatRequest,
+  MuteChatRequest,
   ChatSummary,
   DeleteChatRequest,
   MarkChatRequest,
+  MarkChatReadRequest,
+  SubscribePresenceRequest,
   ChatPresence,
   SendChatStateRequest,
   SuccessResult,
@@ -45,7 +49,7 @@ export class ChatsResource {
    * reconnect, so re-issue it when the session comes back. Subscribe per chat: WhatsApp emits an
    * update on every transition, so a broad subscription is a firehose. whatsapp-web.js answers 501.
    */
-  subscribePresence(sessionId: string, body: MarkChatRequest): Promise<SuccessResult> {
+  subscribePresence(sessionId: string, body: SubscribePresenceRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/presence/subscribe`,
@@ -65,7 +69,7 @@ export class ChatsResource {
   }
 
   /** Mark a chat as read/seen. */
-  markRead(sessionId: string, body: MarkChatRequest): Promise<SuccessResult> {
+  markRead(sessionId: string, body: MarkChatReadRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/chats/read`,
@@ -83,8 +87,8 @@ export class ChatsResource {
   }
 
   /**
-   * Archive or unarchive a chat. `success: false` means the engine declined — on Baileys a chat
-   * with no known history cannot be archived.
+   * Archive or unarchive a chat. `success: false` means the engine declined — on Baileys an id the
+   * session knows no chat for. A known chat with no message in memory or stored is archived without one.
    */
   archive(sessionId: string, body: ArchiveChatRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
@@ -95,8 +99,37 @@ export class ChatsResource {
   }
 
   /**
+   * Pin a chat to the top of the list, or unpin it. `success: false` means WhatsApp declined —
+   * an account may pin only three chats at a time.
+   */
+  pin(sessionId: string, body: PinChatRequest): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/chats/pin`,
+      body,
+    });
+  }
+
+  /**
+   * Mute a chat until an absolute timestamp, or unmute it with `muteUntil: null`.
+   *
+   * `muteUntil` is epoch **milliseconds**. Passing seconds points at an instant in 1970, so the
+   * mute expires the moment it is set while the call still succeeds — nothing in the response
+   * distinguishes that from a mute that took effect.
+   */
+  mute(sessionId: string, body: MuteChatRequest): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'POST',
+      path: `/api/sessions/${encodeSegment(sessionId)}/chats/mute`,
+      body,
+    });
+  }
+
+  /**
    * Delete every message in a chat, keeping the chat itself. `success: false` means the engine
-   * declined — an unknown chat, or on Baileys a chat with no known history.
+   * declined — an unknown chat, or on Baileys a chat with no message in memory or stored. On success the gateway
+   * also deletes its stored copy of the chat's messages (rows, inline and archived media, search
+   * entries); export the history first if you need it.
    */
   clearMessages(sessionId: string, chatId: string): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
@@ -105,7 +138,11 @@ export class ChatsResource {
     });
   }
 
-  /** Delete a chat from the chat list. */
+  /**
+   * Delete a chat from the chat list. On success the gateway also deletes its stored copy of the
+   * chat's messages (rows, inline and archived media, search entries); export the history first if
+   * you need it.
+   */
   delete(sessionId: string, body: DeleteChatRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
       method: 'POST',

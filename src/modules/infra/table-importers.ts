@@ -1,4 +1,6 @@
+import { NulFreeTransformer } from '../../common/transformers/nul-free.transformer';
 import { isSafeSessionName } from '../../common/utils/path-safety';
+import { collectFilterErrors } from '../webhook/filters/filter-validation';
 import type {
   MigrationTables,
   SessionRow,
@@ -8,10 +10,12 @@ import type {
   TemplateRow,
   BaileysStoredMessageRow,
   LidMappingRow,
+  ChatStateRow,
   PluginInstanceRow,
   ConversationMappingRow,
   IngressEventRow,
   WebhookDeliveryFailureRow,
+  WebhookOutboxEventRow,
   IntegrationDeliveryFailureRow,
   StatusUpdateRow,
   AutomationRuleRow,
@@ -30,8 +34,11 @@ export interface TableImporter<K extends keyof MigrationTables = keyof Migration
   /** The id interpolated into the failure warning (lid_mappings rows key on lid, not id). */
   id: (row: MigrationTables[K][number]) => string;
   map: (row: MigrationTables[K][number]) => unknown[];
-  /** Per-row veto: returns the warning to record (the row is skipped) or null to import the row. */
-  skip?: (row: MigrationTables[K][number]) => string | null;
+  /**
+   * Per-row veto: returns the warning to record (the row is skipped) or null to import the row.
+   * `rows` is the whole archived table, for a guard that weighs a row against its siblings.
+   */
+  skip?: (row: MigrationTables[K][number], rows?: MigrationTables[K]) => string | null;
 }
 
 /**
@@ -44,12 +51,82 @@ export interface TableImporter<K extends keyof MigrationTables = keyof Migration
 export type AnyTableImporter = Omit<TableImporter, 'id' | 'map' | 'skip'> & {
   id: (row: never) => string;
   map: (row: never) => unknown[];
-  skip?: (row: never) => string | null;
+  skip?: (row: never, rows?: never) => string | null;
 };
 
 // Registers one concrete descriptor into the union-keyed TABLE_IMPORTERS array.
 function defineTableImporter<K extends keyof MigrationTables>(importer: TableImporter<K>): AnyTableImporter {
   return importer;
+}
+
+// A JSON column arrives decoded from Postgres and as text from SQLite. Text that does not parse is
+// returned as-is, so a validator sees a string and refuses it rather than reading it as absent.
+function decodeJsonColumn(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+// The entity columns that drop U+0000 do it in a TypeORM transformer, which raw SQL never runs. An
+// older SQLite backup may still hold one, and PostgreSQL refuses it in a bound parameter, failing the
+// whole restore. Apply the same drop here, to those same free-text columns and to the template and
+// rule text the DTOs only refuse from 0.24.0 on; never to an id or a lookup key. A template name is the
+// exception: no request can look up a name holding NUL, so keeping it would only strand the template.
+function nulFree(value: unknown): unknown {
+  return NulFreeTransformer.to(value);
+}
+
+/** Apply the terminal index's keeper order to archives created before that index existed. */
+export function deduplicateArchivedWebhookFailures(rows: WebhookDeliveryFailureRow[]): WebhookDeliveryFailureRow[] {
+  const owners = new Map<string, WebhookDeliveryFailureRow>();
+  const identity = (row: WebhookDeliveryFailureRow): string => JSON.stringify([row.webhookId, row.idempotencyKey]);
+  // SQLite's zone-less datetime strings represent UTC, just like PostgreSQL's explicit UTC exports.
+  const timestamp = (value: string): number =>
+    new Date(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(value) ? `${value.replace(' ', 'T')}Z` : value,
+    ).getTime();
+  // Malformed archive rows must still reach the normal all-or-nothing restore checks.
+  const eligible = (row: WebhookDeliveryFailureRow): boolean =>
+    row.attempts > 0 &&
+    row.idempotencyKey != null &&
+    [row.id, row.webhookId, row.sessionId, row.event, row.url, row.lastError, row.createdAt].every(
+      value => value != null,
+    );
+  for (const row of rows) {
+    if (!eligible(row)) continue;
+    const key = identity(row);
+    const previous = owners.get(key);
+    if (!previous) {
+      owners.set(key, row);
+      continue;
+    }
+    const rank =
+      Number(row.payload == null) - Number(previous.payload == null) ||
+      previous.attempts - row.attempts ||
+      timestamp(previous.createdAt) - timestamp(row.createdAt) ||
+      (row.id === previous.id ? 0 : row.id > previous.id ? -1 : 1);
+    if (rank < 0) owners.set(key, row);
+  }
+  return rows.filter(row => !eligible(row) || owners.get(identity(row)) === row);
+}
+
+// (sessionId, NUL-free name) -> id of the first archived template holding it, built once per table.
+const templateNameOwners = new WeakMap<TemplateRow[], Map<string, string>>();
+
+function firstTemplateWithName(rows: TemplateRow[], sessionId: string, name: unknown): string | undefined {
+  let owners = templateNameOwners.get(rows);
+  if (!owners) {
+    owners = new Map();
+    for (const row of rows) {
+      const key = JSON.stringify([row.sessionId, nulFree(row.name)]);
+      if (!owners.has(key)) owners.set(key, row.id);
+    }
+    templateNameOwners.set(rows, owners);
+  }
+  return owners.get(JSON.stringify([sessionId, name]));
 }
 
 // Restore order is FK order: sessions first (webhooks/messages/templates/etc. reference it), the
@@ -60,13 +137,18 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
   defineTableImporter({
     key: 'sessions',
     label: 'session',
-    sql: `INSERT INTO sessions (id, name, status, phone, "pushName", config, "proxyUrl", "proxyType", "connectedAt", "lastActiveAt", "createdAt", "updatedAt") 
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    sql: `INSERT INTO sessions (id, name, status, phone, "pushName", config, "proxyUrl", "proxyType", "connectedAt", "lastActiveAt", "createdAt", "updatedAt", "desiredState")
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     id: (session: SessionRow) => session.id,
-    // A session name becomes the engine auth-directory key, so an unvalidated imported name (this
-    // path bypasses CreateSessionDto) could traverse the filesystem. Skip + warn instead of
-    // throwing, so one bad row doesn't 500 the whole restore.
+    // Both columns reach an auth-directory path: the id keys the directory itself, and the name is
+    // still weighed against it (the boot migration and the legacy purge on delete). An unvalidated
+    // imported value (this path bypasses CreateSessionDto) could traverse the filesystem, and an
+    // unsafe id would only surface later as a refused start. Skip + warn instead of throwing, so one
+    // bad row doesn't 500 the whole restore.
     skip: (session: SessionRow) => {
+      if (!isSafeSessionName(session.id)) {
+        return `Skipped session ${JSON.stringify(session.id)}: unsafe id`;
+      }
       if (isSafeSessionName(session.name)) return null;
       return `Skipped session ${session.id}: unsafe name ${JSON.stringify(session.name)}`;
     },
@@ -75,7 +157,7 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       session.name,
       session.status,
       session.phone,
-      session.pushName,
+      nulFree(session.pushName),
       typeof session.config === 'string' ? session.config : JSON.stringify(session.config || {}),
       session.proxyUrl,
       session.proxyType,
@@ -83,6 +165,14 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       session.lastActiveAt,
       session.createdAt,
       session.updatedAt,
+      // A failed delete's 'deleting' restores as 'stopped': no delete runs for the restored row. A
+      // backup written before the column existed, or an unknown value, restores as NULL: eligible for
+      // auto-start and takeover, as before.
+      session.desiredState === 'stopped' ||
+      session.desiredState === 'deleting' ||
+      session.desiredState === 'deleting-stopped'
+        ? 'stopped'
+        : null,
     ],
   }),
 
@@ -93,12 +183,27 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
     sql: `INSERT INTO webhooks (id, "sessionId", url, events, secret, headers, filters, active, "retryCount", "lastTriggeredAt", "createdAt", "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     id: (webhook: WebhookRow) => webhook.id,
+    // This path bypasses CreateWebhookDto. Dispatch reads a filters value without a conditions array
+    // as "no filtering", so a malformed one stored verbatim would deliver every subscribed event, and
+    // an events value that is not a list never fires at all. Veto the row with a warning, like the
+    // sessions guard; any warning rolls the restore back and names the row.
+    skip: (webhook: WebhookRow) => {
+      const events = decodeJsonColumn(webhook.events ?? []);
+      if (!Array.isArray(events) || !events.every(event => typeof event === 'string')) {
+        return `Skipped webhook ${webhook.id}: events is not a list of event names`;
+      }
+      const filterErrors = collectFilterErrors(decodeJsonColumn(webhook.filters));
+      if (filterErrors.length === 0) return null;
+      return `Skipped webhook ${webhook.id}: invalid filters (${filterErrors.join('; ')})`;
+    },
     map: (webhook: WebhookRow) => [
       webhook.id,
       webhook.sessionId,
       webhook.url,
       typeof webhook.events === 'string' ? webhook.events : JSON.stringify(webhook.events || []),
-      webhook.secret,
+      // Rows exported after credential redaction (and hand-trimmed archives) carry no secret at
+      // all — restore those as unsigned rather than failing the row on a missing key.
+      webhook.secret ?? null,
       typeof webhook.headers === 'string' ? webhook.headers : JSON.stringify(webhook.headers || {}),
       webhook.filters == null
         ? null
@@ -125,13 +230,13 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       msg.sessionId,
       msg.waMessageId ?? null,
       msg.chatId,
-      msg.chatName ?? null,
+      nulFree(msg.chatName ?? null),
       // Rows exported before the author column existed simply restore to NULL (legacy
       // behavior) instead of failing the whole import on an unknown key.
       msg.author ?? null,
       msg.from,
       msg.to,
-      msg.body ?? null,
+      nulFree(msg.body ?? null),
       msg.type,
       msg.direction,
       msg.timestamp ?? null,
@@ -142,7 +247,7 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       // them matters because the media FILES ride along in the storage export: restoring the rows
       // without their pointers would turn every archived file into an orphan the sweep then reaps.
       msg.mediaPath ?? null,
-      msg.mediaMimetype ?? null,
+      nulFree(msg.mediaMimetype ?? null),
     ],
   }),
 
@@ -181,13 +286,22 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
     sql: `INSERT INTO templates (id, "sessionId", name, body, header, footer, "createdAt", "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     id: (tpl: TemplateRow) => tpl.id,
+    // (sessionId, name) is unique, and the name loses its NUL characters below. Two names of one
+    // session that differ only by NUL would collide on insert and roll the whole restore back, after
+    // any orphan engines were stopped; refuse the second one here instead, naming both rows.
+    skip: (tpl: TemplateRow, rows: TemplateRow[] = []) => {
+      const name = nulFree(tpl.name);
+      const owner = firstTemplateWithName(rows, tpl.sessionId, name);
+      if (owner === undefined || owner === tpl.id) return null;
+      return `Skipped template ${tpl.id}: name ${JSON.stringify(name)} without NUL characters collides with template ${owner} of session ${tpl.sessionId}`;
+    },
     map: (tpl: TemplateRow) => [
       tpl.id,
       tpl.sessionId,
-      tpl.name,
-      tpl.body,
-      tpl.header ?? null,
-      tpl.footer ?? null,
+      nulFree(tpl.name),
+      nulFree(tpl.body),
+      nulFree(tpl.header ?? null),
+      nulFree(tpl.footer ?? null),
       tpl.createdAt,
       tpl.updatedAt,
     ],
@@ -213,9 +327,33 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
   defineTableImporter({
     key: 'lidMappings',
     label: 'lid mapping',
-    sql: `INSERT INTO lid_mappings (lid, phone, "sessionId", "updatedAt") VALUES ($1, $2, $3, $4)`,
+    sql: `INSERT INTO lid_mappings (lid, phone, "sessionId", "updatedAt", "isReported") VALUES ($1, $2, $3, $4, $5)`,
     id: (lm: LidMappingRow) => lm.lid,
-    map: (lm: LidMappingRow) => [lm.lid, lm.phone ?? null, lm.sessionId ?? null, lm.updatedAt],
+    map: (lm: LidMappingRow) => [
+      lm.lid,
+      lm.phone ?? null,
+      lm.sessionId ?? null,
+      lm.updatedAt,
+      lm.isReported === true || lm.isReported === 1,
+    ],
+  }),
+
+  // Import chat states (optional; not a FK, restored as a standalone per-session cache table)
+  defineTableImporter({
+    key: 'chatStates',
+    label: 'chat state',
+    sql: `INSERT INTO chat_states ("sessionId", "chatId", "muteEndTime", archived, pinned, observed, "deletedAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    id: (cs: ChatStateRow) => `${cs.sessionId}/${cs.chatId}`,
+    map: (cs: ChatStateRow) => [
+      cs.sessionId,
+      cs.chatId,
+      cs.muteEndTime ?? null,
+      cs.archived,
+      cs.pinned,
+      cs.observed ?? null,
+      cs.deletedAt ?? null,
+      cs.updatedAt,
+    ],
   }),
 
   // Import plugin instances (Integration Fabric config + ingress HMAC secret)
@@ -305,12 +443,36 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       wf.deliveryId,
       wf.attempts,
       wf.lastStatusCode,
-      wf.lastError,
+      nulFree(wf.lastError),
       wf.createdAt,
     ],
   }),
 
-  // Import integration delivery failures (inbound + outbound DLQ)
+  // Import the outbound delivery record. Restoring it restores the replay backlog: a 'pending'
+  // row still carries its payload, so the reconciler on the target instance picks up where the
+  // source left off.
+  defineTableImporter({
+    key: 'webhookOutboxEvents',
+    label: 'webhook outbox event',
+    sql: `INSERT INTO webhook_outbox_events (id, "webhookId", "sessionId", event, "idempotencyKey", "deliveryId", payload, state, attempts, "lastAttemptAt", "createdAt")
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    id: (row: WebhookOutboxEventRow) => row.id,
+    map: (row: WebhookOutboxEventRow) => [
+      row.id,
+      row.webhookId,
+      row.sessionId,
+      row.event,
+      row.idempotencyKey,
+      row.deliveryId,
+      row.payload == null ? null : typeof row.payload === 'string' ? row.payload : JSON.stringify(row.payload),
+      row.state,
+      row.attempts,
+      row.lastAttemptAt,
+      row.createdAt,
+    ],
+  }),
+
+  // Import integration delivery failures (inbound DLQ; direction restored as stored)
   defineTableImporter({
     key: 'integrationDeliveryFailures',
     label: 'integration delivery failure',
@@ -325,7 +487,7 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       df.sessionId,
       df.deliveryId,
       df.attempts,
-      df.lastError,
+      nulFree(df.lastError),
       df.payload == null ? null : typeof df.payload === 'string' ? df.payload : JSON.stringify(df.payload),
       df.redriven,
       df.createdAt,
@@ -343,13 +505,13 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
       su.id,
       su.sessionId,
       su.contactJid,
-      su.contactName ?? null,
-      su.contactPushName ?? null,
+      nulFree(su.contactName ?? null),
+      nulFree(su.contactPushName ?? null),
       su.waStatusId,
       su.type,
-      su.caption ?? null,
+      nulFree(su.caption ?? null),
       su.mediaPath ?? null,
-      su.mediaMimetype ?? null,
+      nulFree(su.mediaMimetype ?? null),
       su.mediaOmitted ?? false,
       su.omitReason ?? null,
       su.backgroundColor ?? null,
@@ -367,13 +529,25 @@ export const TABLE_IMPORTERS: AnyTableImporter[] = [
     sql: `INSERT INTO automation_rules (id, "sessionId", name, enabled, conditions, "replyText", "cooldownSeconds", "createdAt", "updatedAt")
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     id: (rule: AutomationRuleRow) => rule.id,
+    // This path bypasses the rule DTOs. A conditions value without a conditions array matches every
+    // inbound message, so a malformed one stored verbatim would autoreply to every contact; veto the
+    // row with a warning, like the webhooks guard.
+    skip: (rule: AutomationRuleRow) => {
+      const errors = collectFilterErrors(decodeJsonColumn(rule.conditions));
+      if (errors.length === 0) return null;
+      return `Skipped automation rule ${rule.id}: invalid conditions (${errors.join('; ')})`;
+    },
     map: (rule: AutomationRuleRow) => [
       rule.id,
       rule.sessionId,
-      rule.name,
+      nulFree(rule.name),
       rule.enabled ?? true,
-      rule.conditions ?? null,
-      rule.replyText,
+      rule.conditions == null
+        ? null
+        : typeof rule.conditions === 'string'
+          ? rule.conditions
+          : JSON.stringify(rule.conditions),
+      nulFree(rule.replyText),
       rule.cooldownSeconds ?? 60,
       rule.createdAt,
       rule.updatedAt,
@@ -392,10 +566,12 @@ const EXPECTED_TABLE_KEYS: ReadonlyArray<keyof MigrationTables> = [
   'templates',
   'baileysStoredMessages',
   'lidMappings',
+  'chatStates',
   'pluginInstances',
   'conversationMappings',
   'ingressEvents',
   'webhookDeliveryFailures',
+  'webhookOutboxEvents',
   'integrationDeliveryFailures',
   'statusUpdates',
   'automationRules',

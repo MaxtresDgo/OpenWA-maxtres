@@ -14,8 +14,7 @@ import type { Session } from './entities/session.entity';
  * would vacuously approve.
  */
 describe('SessionProxyInterceptor', () => {
-  // A real UUID: the interceptor refuses to route malformed ids (they cannot name a session, and a
-  // raw uuid-column lookup on Postgres would 500 before the route pipe could answer 400).
+  // Exercise both UUID ids and the safe string ids accepted by data import.
   const SID = '3f8d1c2a-4b6e-4f0d-9a7c-2e5b8d1f6a3c';
 
   const row = (over: Partial<Session> = {}): Partial<Session> => ({
@@ -42,6 +41,15 @@ describe('SessionProxyInterceptor', () => {
     originalUrl: `/api/sessions/${SID}/messages?limit=5`,
     ...over,
   });
+
+  /** A port nothing listens on: connecting to it is refused before any request is sent. */
+  const closedPort = async (): Promise<number> => {
+    const probe = http.createServer();
+    await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+    const { port } = probe.address() as AddressInfo;
+    await new Promise<void>(resolve => probe.close(() => resolve()));
+    return port;
+  };
 
   const makeResponse = () => {
     const res = {
@@ -96,12 +104,18 @@ describe('SessionProxyInterceptor', () => {
     // force local execution on a non-owner (a stop() here writes DISCONNECTED while the owner's
     // engine stays up). The refusal doubles as the loop guard — a marked request is never
     // forwarded again, it is answered with a retryable conflict instead.
-    it('refuses (409) a request already marked forwarded that lands on a live non-owner', async () => {
-      const req = request({ headers: { [FORWARDED_HEADER]: 'peer-node', 'x-api-key': 'k' } });
-      const { interceptor, context, next, handle } = build({ req });
-      await expect(interceptor.intercept(context, next)).rejects.toMatchObject({ status: 409 });
-      expect(handle).not.toHaveBeenCalled();
-    });
+    it.each([SID, 'legacy-session'])(
+      'refuses a marked request for session %s that lands on a live non-owner',
+      async sessionId => {
+        const req = request({
+          params: { sessionId },
+          headers: { [FORWARDED_HEADER]: 'peer-node', 'x-api-key': 'k' },
+        });
+        const { interceptor, context, next, handle } = build({ req, row: row({ id: sessionId }) });
+        await expect(interceptor.intercept(context, next)).rejects.toMatchObject({ status: 409 });
+        expect(handle).not.toHaveBeenCalled();
+      },
+    );
 
     it('executes a forwarded request locally when this node hosts (or may host) the session', async () => {
       const req = request({ headers: { [FORWARDED_HEADER]: 'peer-node', 'x-api-key': 'k' } });
@@ -115,9 +129,16 @@ describe('SessionProxyInterceptor', () => {
       expect(await ranLocally(await unowned.interceptor.intercept(unowned.context, unowned.next))).toBe(true);
     });
 
-    it('skips routing for a malformed id — the route pipe answers 400, not a raw uuid-column query', async () => {
-      const req = request({ params: { sessionId: 'not-a-uuid' } });
-      const { interceptor, context, next, findOne } = build({ req });
+    it('handles an unknown string id locally after looking up its owner', async () => {
+      const req = request({ params: { sessionId: 'missing-session' } });
+      const { interceptor, context, next, findOne } = build({ req, row: null });
+      expect(await ranLocally(await interceptor.intercept(context, next))).toBe(true);
+      expect(findOne).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'missing-session' } }));
+    });
+
+    it('handles an id containing NUL locally without querying its owner', async () => {
+      const req = request({ params: { sessionId: 'session\0name' } });
+      const { interceptor, context, next, findOne } = build({ req, row: null });
       expect(await ranLocally(await interceptor.intercept(context, next))).toBe(true);
       expect(findOne).not.toHaveBeenCalled();
     });
@@ -179,13 +200,17 @@ describe('SessionProxyInterceptor', () => {
       seen = [];
     });
 
-    it('relays method, path, query, body and auth to the owner, and the owner’s answer back', async () => {
+    it.each([SID, 'legacy-session'])('relays a send for session %s and the owner response', async sessionId => {
       const req = request({
+        params: { sessionId },
         method: 'POST',
-        originalUrl: `/api/sessions/${SID}/messages/send-text?trace=1`,
+        originalUrl: `/api/sessions/${sessionId}/messages/send-text?trace=1`,
         body: { chatId: '628@c.us', text: 'halo' },
       });
-      const { interceptor, context, next, handle, res } = build({ req, row: row({ nodeUrl: serverUrl }) });
+      const { interceptor, context, next, handle, res, findOne } = build({
+        req,
+        row: row({ id: sessionId, nodeUrl: serverUrl }),
+      });
 
       const result = await interceptor.intercept(context, next);
       // The response was written directly, so nothing may flow to the route handler. The observable
@@ -193,10 +218,11 @@ describe('SessionProxyInterceptor', () => {
       // which rejects on an empty one and logged an ERROR for every successful forward.
       expect(await lastValueFrom(result)).toBeUndefined();
       expect(handle).not.toHaveBeenCalled();
+      expect(findOne).toHaveBeenCalledWith(expect.objectContaining({ where: { id: sessionId } }));
 
       expect(seen).toHaveLength(1);
       expect(seen[0].method).toBe('POST');
-      expect(seen[0].url).toBe(`/api/sessions/${SID}/messages/send-text?trace=1`);
+      expect(seen[0].url).toBe(`/api/sessions/${sessionId}/messages/send-text?trace=1`);
       expect(seen[0].headers['x-api-key']).toBe('k-123');
       expect(seen[0].headers[FORWARDED_HEADER]).toBe('me');
       expect(JSON.parse(seen[0].body)).toEqual({ chatId: '628@c.us', text: 'halo' });
@@ -209,6 +235,21 @@ describe('SessionProxyInterceptor', () => {
       expect(JSON.parse(String(sentBody))).toEqual({ servedBy: 'the-owner' });
     });
 
+    it('labels a re-serialised form body as JSON, so the owner parses what was sent', async () => {
+      const req = request({
+        method: 'POST',
+        originalUrl: `/api/sessions/${SID}/messages/send-text`,
+        headers: { 'x-api-key': 'k-123', 'content-type': 'application/x-www-form-urlencoded' },
+        body: { chatId: '628@c.us', text: 'hi & bye' },
+      });
+      const { interceptor, context, next } = build({ req, row: row({ nodeUrl: serverUrl }) });
+
+      await interceptor.intercept(context, next);
+
+      expect(seen[0].headers['content-type']).toBe('application/json');
+      expect(JSON.parse(seen[0].body)).toEqual({ chatId: '628@c.us', text: 'hi & bye' });
+    });
+
     it('a GET carries no body', async () => {
       const { interceptor, context, next } = build({ req: request(), row: row({ nodeUrl: serverUrl }) });
 
@@ -218,9 +259,6 @@ describe('SessionProxyInterceptor', () => {
       expect(seen[0].body).toBe('');
     });
 
-    // Without the chain the owner sees every forwarded call as coming from THIS node — an
-    // allowedIps-restricted key 401s on every forwarded request, and the per-IP throttler pools
-    // all forwarded traffic into one bucket.
     // End-to-end proof of the absolute-form vector: a raw HTTP request whose target names another
     // origin must still be forwarded to the OWNER, never to the origin the caller chose — otherwise
     // the caller receives the attacker origin's response with their own API key already spent on it.
@@ -248,6 +286,9 @@ describe('SessionProxyInterceptor', () => {
       }
     });
 
+    // Without the chain the owner sees every forwarded call as coming from THIS node: an
+    // allowedIps-restricted key is refused with 403 on every forwarded request, and the per-IP
+    // throttler pools all forwarded traffic into one bucket.
     it('appends the observed peer to x-forwarded-for so the owner can resolve the real client', async () => {
       const direct = build({
         req: request({ socket: { remoteAddress: '::ffff:203.0.113.7' } }),
@@ -265,6 +306,42 @@ describe('SessionProxyInterceptor', () => {
       });
       await chained.interceptor.intercept(chained.context, chained.next);
       expect(seen[1].headers['x-forwarded-for']).toBe('198.51.100.9, 10.0.0.4');
+    });
+
+    // The owner claims the Idempotency-Key, not this hop: a send landing on a non-owner node is
+    // forwarded before the route's own interceptor runs. Without the header the owner would run the
+    // send unclaimed, and a client retry after a timeout would send the message twice.
+    it('forwards the Idempotency-Key to the owner', async () => {
+      const req = request({
+        method: 'POST',
+        originalUrl: `/api/sessions/${SID}/messages/send-text`,
+        headers: { 'x-api-key': 'k-123', 'content-type': 'application/json', 'idempotency-key': 'order-42' },
+        body: { chatId: '628@c.us', text: 'halo' },
+      });
+      const { interceptor, context, next } = build({ req, row: row({ nodeUrl: serverUrl }) });
+
+      await interceptor.intercept(context, next);
+
+      expect(seen[0].headers['idempotency-key']).toBe('order-42');
+    });
+
+    // Without it a client cannot tell an answer replayed from a stored key from a new send.
+    it('relays Idempotent-Replayed from the owner to the client', async () => {
+      const replaying = http.createServer((_req, res) => {
+        res.writeHead(201, { 'content-type': 'application/json', 'Idempotent-Replayed': 'true' });
+        res.end(JSON.stringify({ messageId: 'M1' }));
+      });
+      await new Promise<void>(resolve => replaying.listen(0, '127.0.0.1', resolve));
+      const url = `http://127.0.0.1:${(replaying.address() as AddressInfo).port}`;
+
+      try {
+        const { interceptor, context, next, res } = build({ row: row({ nodeUrl: url }) });
+        await interceptor.intercept(context, next);
+
+        expect(res.setHeader).toHaveBeenCalledWith('idempotent-replayed', 'true');
+      } finally {
+        await new Promise<void>(resolve => replaying.close(() => resolve()));
+      }
     });
 
     // A forwarded 429 comes from the OWNER's counters; without relaying its throttle headers the
@@ -305,7 +382,7 @@ describe('SessionProxyInterceptor', () => {
 
     it('an unreachable owner answers 503 with the owner named, never a hang or a crash', async () => {
       const { interceptor, context, next, handle, res } = build({
-        row: row({ nodeUrl: 'http://127.0.0.1:1' }),
+        row: row({ nodeUrl: `http://127.0.0.1:${await closedPort()}` }),
         timeoutMs: 2000,
       });
 
@@ -316,6 +393,79 @@ describe('SessionProxyInterceptor', () => {
       expect(errorBody.statusCode).toBe(503);
       expect(errorBody.message).toContain('peer-node');
       expect(handle).not.toHaveBeenCalled();
+    });
+
+    // Once the request has been sent the owner may have acted on it, and clients replay a POST on
+    // 503 as declined-before-acting. A send that timed out or broke mid-flight must not look like
+    // that, or a retry sends the WhatsApp message twice.
+    const withOwner = async (handler: http.RequestListener, run: (url: string) => Promise<void>): Promise<void> => {
+      const owner = http.createServer(handler);
+      await new Promise<void>(resolve => owner.listen(0, '127.0.0.1', resolve));
+      try {
+        await run(`http://127.0.0.1:${(owner.address() as AddressInfo).port}`);
+      } finally {
+        owner.closeAllConnections();
+        await new Promise<void>(resolve => owner.close(() => resolve()));
+      }
+    };
+    const sendRequest = () => request({ method: 'POST', originalUrl: `/api/sessions/${SID}/messages/send-text` });
+
+    it('answers 504, not 503, when the owner received the send but did not answer in time', async () => {
+      await withOwner(
+        () => undefined,
+        async url => {
+          const { interceptor, context, next, res } = build({
+            row: row({ nodeUrl: url }),
+            req: sendRequest(),
+            timeoutMs: 200,
+          });
+          await interceptor.intercept(context, next);
+
+          expect(res.status).toHaveBeenCalledTimes(1);
+          expect(res.status).toHaveBeenCalledWith(504);
+          expect((res.json.mock.calls[0] as [{ error: string }])[0].error).toBe('Gateway Timeout');
+        },
+      );
+    });
+
+    it('answers 502, not 503, when the connection breaks after the send was dispatched', async () => {
+      await withOwner(
+        req => req.socket.destroy(),
+        async url => {
+          const { interceptor, context, next, res } = build({ row: row({ nodeUrl: url }), req: sendRequest() });
+          const warn = jest.spyOn((interceptor as unknown as { logger: { warn: () => void } }).logger, 'warn');
+          await interceptor.intercept(context, next);
+
+          expect(res.status).toHaveBeenCalledTimes(1);
+          expect(res.status).toHaveBeenCalledWith(502);
+          // A 502 can also come from a failure before anything was sent (an untrusted TLS
+          // certificate), so the answer must not claim a send and must point at NODE_URL.
+          const { message } = (res.json.mock.calls[0] as [{ message: string }])[0];
+          expect(message).toContain('possibly after the request was sent');
+          expect(message).toContain('NODE_URL');
+          // fetch only says 'fetch failed'; the cause code is what names the real failure.
+          const [, logged] = warn.mock.calls[0] as unknown as [string, { cause: unknown }];
+          expect(logged.cause).toMatch(/^[A-Z_]+$/);
+        },
+      );
+    });
+
+    it('answers 502 without relaying the owner status or headers when the body read fails', async () => {
+      await withOwner(
+        (req, res) => {
+          res.writeHead(201, { 'content-type': 'application/json', 'content-length': '100' });
+          res.write('{"id":');
+          setTimeout(() => req.socket.destroy(), 20);
+        },
+        async url => {
+          const { interceptor, context, next, res } = build({ row: row({ nodeUrl: url }), req: sendRequest() });
+          await interceptor.intercept(context, next);
+
+          expect(res.status).toHaveBeenCalledTimes(1);
+          expect(res.status).toHaveBeenCalledWith(502);
+          expect(res.setHeader).not.toHaveBeenCalled();
+        },
+      );
     });
   });
 });
@@ -356,5 +506,18 @@ describe('forwardTarget', () => {
 
   it('carries the owner base path when one is configured', () => {
     expect(forwardTarget('/api/sessions/s1', 'http://10.0.0.5:2785/')).toBe('http://10.0.0.5:2785/api/sessions/s1');
+    // An owner behind a path-prefixed reverse proxy: the prefix is where its API lives.
+    expect(forwardTarget('/api/sessions/s1?x=1', 'https://node-a.example.com/openwa/')).toBe(
+      'https://node-a.example.com/openwa/api/sessions/s1?x=1',
+    );
+    expect(forwardTarget('/api/sessions/s1', 'https://node-a.example.com/openwa')).toBe(
+      'https://node-a.example.com/openwa/api/sessions/s1',
+    );
+  });
+
+  it('keeps the owner origin and prefix for a network-path target under a prefixed base', () => {
+    const target = new URL(forwardTarget('http://attacker.tld//evil.host/x', 'https://node-a.example.com/openwa'));
+    expect(target.origin).toBe('https://node-a.example.com');
+    expect(target.pathname.startsWith('/openwa/')).toBe(true);
   });
 });

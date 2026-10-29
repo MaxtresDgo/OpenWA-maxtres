@@ -85,6 +85,11 @@ func (s *MessagesService) Reply(ctx context.Context, sessionID string, body Repl
 	return s.send(ctx, sessionID, "reply", body)
 }
 
+// ClickButton taps a choice on a WhatsApp Business prompt. Baileys only (whatsapp-web.js returns 501).
+func (s *MessagesService) ClickButton(ctx context.Context, sessionID string, body ClickButtonRequest) (*MessageResponse, error) {
+	return s.send(ctx, sessionID, "click-button", body)
+}
+
 // Forward forwards a message between chats.
 func (s *MessagesService) Forward(ctx context.Context, sessionID string, body ForwardMessageRequest) (*MessageResponse, error) {
 	return s.send(ctx, sessionID, "forward", body)
@@ -121,7 +126,7 @@ func (s *MessagesService) EditMessage(ctx context.Context, sessionID string, bod
 	return &out, nil
 }
 
-// History reads live chat history from WhatsApp.
+// History reads live chat history from WhatsApp. whatsapp-web.js only; Baileys answers 501.
 func (s *MessagesService) History(ctx context.Context, sessionID, chatID string, query *MessageHistoryQuery) ([]ChatHistoryMessage, error) {
 	var out []ChatHistoryMessage
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/history"
@@ -129,7 +134,7 @@ func (s *MessagesService) History(ctx context.Context, sessionID, chatID string,
 	return out, err
 }
 
-// Reactions returns the reactions on a message.
+// Reactions returns the reactions on a message. whatsapp-web.js only; Baileys answers 501.
 func (s *MessagesService) Reactions(ctx context.Context, sessionID, chatID, messageID string) ([]ReactionRecord, error) {
 	var out []ReactionRecord
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/" + pathEscape(messageID) + "/reactions"
@@ -173,12 +178,14 @@ func (s *MessagesService) Unpin(ctx context.Context, sessionID string, body Unpi
 	return &out, nil
 }
 
-// Media fetches a message's archived media bytes. The server answers 404 when
-// nothing is archived for the message (archiving off when it arrived, no media,
-// over the archive cap, or cleared by retention).
+// Media fetches a message's stored media bytes: the archived file when one
+// exists, else the inline copy on the message row — which covers media sent by
+// this account. The server answers 404 when neither holds bytes (no media, a
+// size-only marker, or a URL-based send, whose bytes the gateway does not store
+// though on whatsapp-web.js the own-send echo may).
 func (s *MessagesService) Media(ctx context.Context, sessionID, chatID, messageID string) (*MessageMedia, error) {
 	path := s.base(sessionID) + "/" + pathEscape(chatID) + "/" + pathEscape(messageID) + "/media"
-	data, contentType, err := s.client.doRaw(ctx, "GET", path, nil, nil)
+	data, contentType, err := s.client.doRaw(ctx, "GET", path, nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -206,9 +213,10 @@ func (s *MessagesService) BatchStatus(ctx context.Context, sessionID, batchID st
 	return &out, nil
 }
 
-// CancelBatch cancels a running batch. Requires an OPERATOR-level key.
-func (s *MessagesService) CancelBatch(ctx context.Context, sessionID, batchID string) (*BatchStatusResponse, error) {
-	var out BatchStatusResponse
+// CancelBatch cancels a running batch. Requires an OPERATOR-level key. The reply
+// carries no per-recipient results; call BatchStatus for those.
+func (s *MessagesService) CancelBatch(ctx context.Context, sessionID, batchID string) (*BatchCancelResponse, error) {
+	var out BatchCancelResponse
 	path := s.base(sessionID) + "/batch/" + pathEscape(batchID) + "/cancel"
 	err := s.client.do(ctx, "POST", path, nil, nil, &out)
 	if err != nil {

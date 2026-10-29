@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { EngineRegistry } from '../../engine/engine-registry.service';
-import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import { CallLinkType, IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 
 /**
  * Owns engine access for call operations. Controllers depend on this service instead of
@@ -18,10 +18,18 @@ export class CallService {
 
   /**
    * Reject a currently-ringing incoming call. An unknown or no-longer-ringing callId surfaces
-   * as 404 via the adapter's CallNotFoundError; EngineNotSupportedError would map to 501 (both
-   * engines support rejectCall today, so no special-casing here).
+   * as 404 via the Baileys adapter's CallNotFoundError; the whatsapp-web.js adapter throws
+   * EngineNotSupportedError, which maps to 501, so no special-casing here.
    */
   rejectCall(sessionId: string, callId: string): Promise<void> {
     return this.getEngine(sessionId).rejectCall(callId);
+  }
+
+  /**
+   * Generate a shareable call link. A WhatsApp-side refusal (no link generated) surfaces as 403 via
+   * the adapter's EngineRefusedError rather than as a success carrying an empty string.
+   */
+  createCallLink(sessionId: string, type: CallLinkType, startTime: number): Promise<string> {
+    return this.getEngine(sessionId).createCallLink(type, startTime);
   }
 }

@@ -258,3 +258,134 @@ describe.each(['docker-compose.yml', 'docker-compose.dev.yml'])('every blank for
     expect(uncommented.filter(key => blankForwards().includes(key))).toEqual([]);
   });
 });
+
+/**
+ * The rule above binds only the keys compose forwards blank. `.env.example`'s own header promises
+ * something wider — "every setting the dashboard owns is commented out" — and the dashboard owns
+ * keys that have no blank forward at all (POSTGRES_BUILTIN, REDIS_BUILTIN, MINIO_BUILTIN). Those slipped
+ * past the compose-derived check and shipped uncommented, pinning the matching Infrastructure control
+ * for anyone who ran the documented `cp .env.example .env`.
+ *
+ * Derived from the appliers that write data/.env.generated, plus the controller's own queue write, so
+ * a key added to a section is covered without anyone remembering this file exists.
+ */
+describe('every key the dashboard writes is commented out in .env.example', () => {
+  const sectionsSource = ['config-sections.ts', 'infra-config.controller.ts']
+    .map(file => fs.readFileSync(path.join(__dirname, '../modules/infra', file), 'utf8'))
+    .join('\n');
+
+  /** `updates.KEY = …` */
+  const directlyAssigned = (): string[] => [...sectionsSource.matchAll(/updates\.([A-Z0-9_]+)\s*=/g)].map(m => m[1]);
+  /** `setSecret(updates, 'KEY', …)` — an indirection the direct form cannot see. */
+  const viaSecretHelper = (): string[] =>
+    [...sectionsSource.matchAll(/setSecret\(\s*updates\s*,\s*'([A-Z0-9_]+)'/g)].map(m => m[1]);
+
+  const dashboardOwned = (): string[] => [...new Set([...directlyAssigned(), ...viaSecretHelper()])].sort();
+
+  // Guard both extractors independently. The direct form alone finds 28 keys and silently misses
+  // every key routed through setSecret, so a single combined count would look healthy while the
+  // secret keys went unchecked.
+  it('extracts keys from both write forms', () => {
+    expect(directlyAssigned()).toContain('DATABASE_SSL');
+    expect(directlyAssigned()).toContain('QUEUE_ENABLED'); // written by the controller, not a section applier
+    expect(viaSecretHelper()).toContain('REDIS_PASSWORD');
+  });
+
+  const assignedKeys = (text: string): string[] =>
+    text
+      .split('\n')
+      .map(line => /^([A-Z0-9_]+)=/.exec(line)?.[1])
+      .filter((key): key is string => key !== undefined);
+  const uncommentedKeys = (file: string): string[] =>
+    assignedKeys(fs.readFileSync(path.join(__dirname, '../..', file), 'utf8'));
+
+  it('ships none of them uncommented in .env.example', () => {
+    const uncommented = uncommentedKeys('.env.example');
+    expect(uncommented).toContain('NODE_ENV'); // the file really does ship some keys uncommented
+    expect(uncommented.filter(key => dashboardOwned().includes(key))).toEqual([]);
+  });
+
+  // docs/10 section 10.5 presents its .env block as an excerpt of .env.example, so operators copy it
+  // the same way and it has to follow the same rule. A published pepper is no secret either.
+  it('ships none of them uncommented in the docs/10 environment excerpt', () => {
+    const docs = fs.readFileSync(path.join(__dirname, '../../docs/10-devops-infrastructure.md'), 'utf8');
+    const section = docs.slice(docs.indexOf('## 10.5 Environment Configuration'));
+    const uncommented = assignedKeys(/```bash\n([\s\S]*?)```/.exec(section)?.[1] ?? '');
+    expect(uncommented).toContain('NODE_ENV'); // the block was found and does ship some keys uncommented
+    expect(uncommented.filter(key => dashboardOwned().includes(key))).toEqual([]);
+    expect(uncommented).not.toContain('API_KEY_PEPPER');
+  });
+
+  // The docs/08 and docs/03 env profiles are pasted into .env the same way.
+  it.each([
+    ['docs/08-development-guidelines.md', '### Environment Variables', '## 8.9', 2],
+    ['docs/03-system-architecture.md', '### Configuration Examples', '### Choosing a Profile', 3],
+  ])('ships none of them uncommented in the %s profiles', (file, from, to, blocks) => {
+    const docs = fs.readFileSync(path.join(__dirname, '../..', file), 'utf8');
+    const start = docs.indexOf(from);
+    const section = docs.slice(start, docs.indexOf(to, start));
+    const bodies = [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map(match => match[1]);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(bodies).toHaveLength(blocks); // the profiles were found
+    const uncommented = bodies.flatMap(assignedKeys);
+    expect(uncommented.filter(key => dashboardOwned().includes(key))).toEqual([]);
+    expect(uncommented).not.toContain('API_KEY_PEPPER');
+  });
+
+  /**
+   * `.env.minimal` is also copied to `.env` by the docs (docs/README.md), but its rule is NARROWER on
+   * purpose: it describes itself as a development/personal config and deliberately pins the choices an
+   * operator makes by hand there — DATABASE_TYPE, ENGINE_TYPE, the puppeteer flags. Those pins are the
+   * file's reason to exist.
+   *
+   * The built-in datastore toggles are different: they are pure Dashboard > Infrastructure switches, so
+   * pinning them makes the UI control move, save, report success and change nothing — the same trap the
+   * .env.example rule exists for.
+   */
+  it('ships the built-in datastore toggles commented out in .env.minimal', () => {
+    const toggles = ['POSTGRES_BUILTIN', 'REDIS_BUILTIN', 'MINIO_BUILTIN'];
+    expect(toggles.every(t => dashboardOwned().includes(t))).toBe(true); // control: they ARE dashboard-owned
+
+    // Non-vacuity control on the OTHER side. The assertion below is a `.filter(...).toEqual([])`,
+    // which an empty parse satisfies just as well as a correct file — a renamed template, a parser
+    // that stops matching, or a file that became all comments would all read as "no pins found" and
+    // pass while binding nothing. Anchor on a key this template exists to pin.
+    const uncommented = uncommentedKeys('.env.minimal');
+    expect(uncommented.length).toBeGreaterThan(0);
+    expect(uncommented).toContain('REDIS_ENABLED');
+
+    expect(uncommented.filter(key => toggles.includes(key))).toEqual([]);
+  });
+});
+
+/**
+ * The inbound-media knobs must reach the container.
+ *
+ * `MEDIA_DOWNLOAD_ENABLED` turns off what env.validation.ts itself calls "the most expensive
+ * behaviour the gateway has" — decrypting every inbound media blob and base64-inlining it into every
+ * message row at up to 50 MiB apiece. Neither compose file forwarded it, nor the cap, the timeout or
+ * the concurrency, so an operator running the bundled stack set the value in `.env`, saw no error and
+ * no log line, and kept paying for the behaviour. The only remaining path was hand-editing
+ * `data/.env.generated` inside the mounted volume, which `.env.example` does not mention for these
+ * keys. The sibling MEDIA_CONVERSION_* family was forwarded all along.
+ */
+describe.each(['docker-compose.yml', 'docker-compose.dev.yml'])('%s forwards the inbound-media knobs', file => {
+  const compose = (): string => fs.readFileSync(path.join(__dirname, '../..', file), 'utf8');
+
+  const forwards = (key: string): boolean => new RegExp(`^\\s*-\\s*${key}=`, 'm').test(compose());
+
+  // Guards the assertions below: a matcher that can never fire would pass them vacuously.
+  it('detects a key that IS forwarded', () => {
+    expect(forwards('MEDIA_CONVERSION_ENABLED')).toBe(true);
+  });
+
+  it.each([
+    'MEDIA_DOWNLOAD_ENABLED',
+    'MEDIA_DOWNLOAD_MAX_BYTES',
+    'MEDIA_DOWNLOAD_TIMEOUT_MS',
+    'INBOUND_MEDIA_CONCURRENCY',
+    'INBOUND_MEDIA_GLOBAL_CONCURRENCY',
+  ])('forwards %s', key => {
+    expect(forwards(key)).toBe(true);
+  });
+});

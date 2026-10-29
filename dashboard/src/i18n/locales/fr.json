@@ -7,10 +7,12 @@
   },
   "common": {
     "appName": "OpenWA",
+    "updateAvailable": "v{{version}} disponible",
     "loading": "Chargement...",
     "cancel": "Annuler",
     "delete": "Supprimer",
     "create": "Créer",
+    "save": "Enregistrer",
     "close": "Fermer",
     "showApiKey": "Afficher la clé API",
     "hideApiKey": "Masquer la clé API",
@@ -30,8 +32,13 @@
     "never": "Jamais",
     "justNow": "À l'instant",
     "minAgo": "Il y a {{count}} min",
-    "hoursAgo": "Il y a {{count}} heures",
+    "minAgo_other": "Il y a {{count}} min",
+    "minAgo_many": "Il y a {{count}} min",
+    "hoursAgo": "Il y a {{count}} heure",
+    "hoursAgo_other": "Il y a {{count}} heures",
+    "hoursAgo_many": "Il y a {{count}} heures",
     "optional": "optionnel",
+    "fieldTooLong": "Limité à {{max}} caractères ({{count}} actuellement).",
     "language": "Langue",
     "back": "Retour",
     "next": "Suivant",
@@ -57,6 +64,7 @@
     "dashboard": "Tableau de bord",
     "sessions": "Sessions",
     "chats": "Discussions",
+    "numberChecker": "Vérificateur de numéros",
     "webhooks": "Webhooks",
     "templates": "Templates",
     "apiKeys": "Clés API",
@@ -66,6 +74,7 @@
     "logs": "Journaux"
   },
   "chats": {
+    "edited": "Modifié",
     "media": {
       "location": "Localisation",
       "call": "Appel",
@@ -86,7 +95,12 @@
     "noMessageYet": "Aucun message pour le moment",
     "unreadBadge": "{{count}} message non lu",
     "unreadBadge_other": "{{count}} messages non lus",
+    "unreadBadge_many": "{{count}} messages non lus",
+    "markedUnread": "Marqué comme non lu",
     "loadingMessages": "Chargement des messages...",
+    "loadingOlderMessages": "Chargement des messages plus anciens...",
+    "loadOlderMessagesError": "Impossible de charger les messages plus anciens. Faites défiler vers le haut pour réessayer.",
+    "loadOlderMessagesRetryHint": "Faites défiler vers le haut pour réessayer.",
     "noMessagesInChat": "Aucun message pour le moment. Envoyez le premier message pour commencer !",
     "downloadDocument": "Télécharger le document",
     "actions": {
@@ -95,8 +109,26 @@
       "delete": "Supprimer le message"
     },
     "replyingTo": "Réponse à {{name}}",
+    "messageType": {
+      "text": "Texte",
+      "image": "Image",
+      "video": "Vidéo",
+      "audio": "Audio",
+      "voice": "Message vocal",
+      "document": "Document",
+      "sticker": "Sticker",
+      "location": "Localisation",
+      "contact": "Contact",
+      "poll": "Sondage",
+      "call": "Appel",
+      "revoked": "Message supprimé",
+      "order": "Commande",
+      "product": "Produit",
+      "masked": "Message masqué",
+      "unknown": "Message",
+      "unknownType": "Type inconnu"
+    },
     "you": "Vous",
-    "youPrefix": "Vous : ",
     "yesterday": "Hier",
     "attachTitle": "Envoyer un fichier / une image",
     "emojiTitle": "Choisir un emoji",
@@ -110,13 +142,16 @@
     "groupSubtitle": "Groupe",
     "privateContactSubtitle": "Contact privé",
     "deleteConfirm": "Supprimer ce message pour tout le monde ?",
+    "promptButtons": "Choix du message",
     "messageDeleted": "🚫 Ce message a été supprimé",
     "messageMasked": "🔒 Masqué par WhatsApp sur les appareils liés — consultez votre téléphone principal",
     "kind": {
       "group": "Groupe",
       "channel": "Chaîne",
       "status": "Statut",
-      "broadcast": "Diffusion"
+      "broadcast": "Diffusion",
+      "individual": "Individuel",
+      "unknown": "Inconnu"
     },
     "tab": {
       "chats": "Discussions",
@@ -126,6 +161,7 @@
     "status": {
       "itemCount": "{{count}} mise à jour",
       "itemCount_other": "{{count}} mises à jour",
+      "itemCount_many": "{{count}} mises à jour",
       "empty": "Aucun contact n'a de statut actif.",
       "loadError": "Échec du chargement des statuts.",
       "mediaUnavailable": "Média indisponible",
@@ -139,17 +175,29 @@
       "backgroundColor": "Couleur de fond",
       "font": "Police",
       "fontDefault": "Par défaut",
+      "fonts": {
+        "system": "Système",
+        "systemText": "Texte système",
+        "script": "Manuscrite",
+        "bold": "Gras",
+        "morningBreeze": "Morning Breeze",
+        "calistoga": "Calistoga",
+        "exo2": "Exo 2",
+        "courierPrime": "Courier Prime"
+      },
       "orLabel": "ou",
       "post": "Publier",
       "posted": "Statut publié",
-      "postFailed": "Impossible de publier le statut"
+      "postFailed": "Impossible de publier le statut",
+      "imageFile": "Image de statut"
     },
     "channels": {
       "notSupported": "Les chaînes ne sont pas prises en charge par le moteur Baileys.",
       "empty": "Vous n'êtes abonné à aucune chaîne pour le moment.",
       "notReady": "La session n'est pas encore prête.",
       "subscribers": "{{count}} abonné",
-      "subscribers_other": "{{count}} abonnés"
+      "subscribers_other": "{{count}} abonnés",
+      "subscribers_many": "{{count}} abonnés"
     },
     "errors": {
       "loadSessions": "Échec du chargement des sessions",
@@ -157,9 +205,158 @@
       "markRead": "Échec du marquage de la discussion comme lue",
       "send": "Échec de l'envoi du message",
       "react": "Échec de la réaction au message",
-      "delete": "Échec de la suppression du message"
+      "delete": "Échec de la suppression du message",
+      "clickButton": "Échec du clic sur le bouton",
+      "fileTooLarge": "Le fichier est trop volumineux (max 18 Mo)",
+      "searchHitSessionNotReady": "La session de ce message n'est pas connectée",
+      "searchHitChatNotListed": "La discussion de ce message est introuvable dans la liste"
     },
-    "loadMessagesError": "Impossible de charger les messages. Vérifiez les journaux du serveur."
+    "loadMessagesError": "Impossible de charger les messages. Vérifiez les journaux du serveur.",
+    "messageStatus": {
+      "pending": "En attente",
+      "sent": "Envoyé",
+      "delivered": "Remis",
+      "read": "Lu",
+      "failed": "Échec"
+    },
+    "today": "Aujourd'hui",
+    "switchSession": "Changer de session",
+    "searchMessages": "Rechercher des messages",
+    "clearSearch": "Effacer la recherche",
+    "filters": {
+      "label": "Filtrer les discussions",
+      "all": "Tous",
+      "unread": "Non lus",
+      "direct": "Discussions 1:1",
+      "groups": "Groupes",
+      "unknown": "Inconnus"
+    },
+    "noFilterResults": "Aucune discussion ne correspond à ce filtre",
+    "contactInfo": "Infos du contact",
+    "moreActions": "Plus d’actions",
+    "copyChatId": "Copier l’ID de la discussion",
+    "chatIdCopied": "ID de la discussion copié",
+    "copyFailed": "Impossible de copier dans le presse-papiers",
+    "closeChat": "Fermer la discussion",
+    "phone": "Numéro de téléphone",
+    "chatId": "ID de la discussion",
+    "newChat": {
+      "title": "Nouvelle discussion",
+      "searchPlaceholder": "Rechercher un nom ou un numéro avec indicatif",
+      "startWithNumber": "Démarrer une discussion avec {{number}}",
+      "contacts": "Contacts",
+      "noContacts": "Aucun contact trouvé",
+      "loadingContacts": "Chargement des contacts...",
+      "contactsError": "Impossible de charger les contacts",
+      "checking": "Vérification du numéro...",
+      "notOnWhatsApp": "{{number}} n'est pas inscrit sur WhatsApp",
+      "checkFailed": "Impossible de vérifier le numéro",
+      "numberHint": "Saisissez les numéros avec l'indicatif du pays, p. ex. +33 6 12 34 56 78"
+    },
+    "newGroup": {
+      "title": "Nouveau groupe",
+      "namePlaceholder": "Nom du groupe",
+      "participantsPlaceholder": "Rechercher des participants ou saisir un numéro",
+      "addNumber": "Ajouter {{number}}",
+      "selected": "{{count}} sélectionné(s)",
+      "create": "Créer le groupe",
+      "created": "Groupe « {{name}} » créé",
+      "createFailed": "Impossible de créer le groupe",
+      "removeParticipant": "Retirer {{name}}"
+    },
+    "sessionPicker": {
+      "searchPlaceholder": "Rechercher des sessions...",
+      "noMatch": "Aucune session ne correspond",
+      "addTitle": "Associer un autre numéro",
+      "addHint": "Créez une session et associez-la avec un code QR"
+    },
+    "group": {
+      "info": "Infos du groupe",
+      "leave": "Quitter le groupe",
+      "leaveConfirm": "Quitter le groupe « {{name}} » ?",
+      "left": "Vous avez quitté « {{name}} »",
+      "leaveFailed": "Impossible de quitter le groupe",
+      "editTitle": "Modifier le groupe",
+      "tabInfo": "Infos",
+      "tabParticipants": "Participants",
+      "managedBy": "Géré via {{session}}",
+      "notAdmin": "Pas administrateur via {{session}}",
+      "name": "Nom du groupe",
+      "picture": "Photo du groupe",
+      "pictureHint": "Cliquez sur ce champ pour choisir une nouvelle photo de groupe.",
+      "readOnlyHint": "Seuls les administrateurs du groupe peuvent le modifier.",
+      "description": "Description",
+      "descriptionPlaceholder": "Description du groupe (facultatif)",
+      "save": "Enregistrer les modifications",
+      "saved": "Groupe mis à jour",
+      "saveFailed": "Impossible d’enregistrer le groupe",
+      "loadFailed": "Impossible de charger les infos du groupe",
+      "participantCount": "Participants : {{count}}",
+      "admin": "Admin",
+      "owner": "Créateur",
+      "makeAdmin": "Nommer administrateur",
+      "removeAdmin": "Retirer l’administration",
+      "remove": "Retirer",
+      "removeConfirm": "Retirer {{name}} du groupe ?",
+      "add": "Ajouter",
+      "addPlaceholder": "Ajoutez un numéro avec l’indicatif du pays",
+      "memberActionFailed": "L’action a échoué",
+      "leaveWarning": "Vous ne recevrez plus ses messages, et seul un administrateur du groupe pourra vous rajouter."
+    },
+    "rowActions": {
+      "actionsFor": "Actions pour {{name}}",
+      "markUnread": "Marquer comme non lu",
+      "markUnreadFailed": "Impossible de marquer la discussion comme non lue",
+      "clear": "Vider la discussion",
+      "clearConfirm": "Supprimer tous les messages de la discussion avec {{name}} ?",
+      "clearWarning": "La discussion reste dans la liste. La passerelle supprime aussi sa copie enregistrée des messages, médias compris ; exportez l’historique avant si vous en avez besoin.",
+      "cleared": "Discussion avec {{name}} vidée",
+      "clearFailed": "Impossible de vider la discussion",
+      "delete": "Supprimer la discussion",
+      "deleteConfirm": "Supprimer la discussion avec {{name}} ?",
+      "deleteWarning": "La discussion disparaît de la liste et la passerelle supprime sa copie enregistrée des messages, médias compris.",
+      "deleted": "Discussion avec {{name}} supprimée",
+      "deleteFailed": "Impossible de supprimer la discussion",
+      "saveContact": "Enregistrer le contact",
+      "renameContact": "Renommer le contact",
+      "firstName": "Prénom",
+      "lastName": "Nom (facultatif)",
+      "contactSaved": "Contact enregistré",
+      "contactSaveFailed": "Impossible d’enregistrer le contact",
+      "pin": "Épingler la discussion",
+      "unpin": "Désépingler la discussion",
+      "pinFailed": "Impossible d’épingler la discussion. WhatsApp autorise au plus trois discussions épinglées.",
+      "unpinFailed": "Impossible de désépingler la discussion",
+      "pinnedLabel": "Épinglée",
+      "mute": "Mettre en sourdine",
+      "unmute": "Réactiver les notifications",
+      "mutedLabel": "En sourdine",
+      "muteTitle": "Mettre « {{name}} » en sourdine",
+      "muteHint": "Les autres participants ne savent pas que vous avez mis la discussion en sourdine. Vous êtes toujours averti quand on vous mentionne.",
+      "muteFailed": "Impossible de modifier les notifications",
+      "archive": "Archiver la discussion",
+      "unarchive": "Désarchiver la discussion",
+      "archived": "Discussion archivée",
+      "unarchived": "Discussion désarchivée",
+      "archiveFailed": "Impossible de modifier l’archive",
+      "archivedEntry": "Archivées",
+      "archivedTitle": "Discussions archivées",
+      "archiveEmpty": "Aucune discussion archivée",
+      "declined": "WhatsApp a refusé la modification.",
+      "block": "Bloquer le contact",
+      "unblock": "Débloquer le contact",
+      "blockConfirm": "Bloquer {{name}} ?",
+      "blockWarning": "Les contacts bloqués ne peuvent plus vous appeler ni vous envoyer de messages.",
+      "blocked": "{{name}} bloqué",
+      "unblocked": "{{name}} débloqué",
+      "blockFailed": "Impossible de modifier le blocage",
+      "muteFor": {
+        "8h": "8 heures",
+        "1w": "1 semaine",
+        "always": "Toujours"
+      },
+      "saveContactUnavailable": "Nécessite un numéro de téléphone connu : cette discussion n’a qu’un identifiant de confidentialité (@lid)."
+    }
   },
   "errorBoundary": {
     "title": "Une erreur est survenue",
@@ -201,6 +398,7 @@
     "noSessions": "Aucune session trouvée. Créez-en une pour commencer.",
     "view": "Voir",
     "disconnect": "Déconnecter",
+    "disconnectFailed": "Impossible de déconnecter la session",
     "errorPrefix": "Erreur : {{message}}",
     "loadError": "Échec du chargement des données",
     "charts": {
@@ -211,6 +409,7 @@
         "30d": "30 j"
       },
       "overTime": "Messages au fil du temps",
+      "overTimeUtcDays": "Messages au fil du temps (jours en UTC)",
       "byType": "Messages par type",
       "topChats": "Discussions principales",
       "sent": "Envoyés",
@@ -235,6 +434,7 @@
   "sessions": {
     "title": "Sessions",
     "subtitle": "Gérez vos sessions WhatsApp et vos connexions par code QR",
+    "feedDisconnected": "Mises à jour en direct interrompues",
     "newSession": "Nouvelle session",
     "searchPlaceholder": "Rechercher des sessions...",
     "filter": {
@@ -258,7 +458,8 @@
       "successTitle": "Session créée",
       "successDesc": "La session \"{{name}}\" a été créée avec succès",
       "errorTitle": "Échec de la création",
-      "errorDefault": "Impossible de créer la session"
+      "errorDefault": "Impossible de créer la session",
+      "tooShort": "Le nom doit contenir au moins 3 caractères."
     },
     "delete": {
       "title": "Confirmer la suppression",
@@ -290,10 +491,30 @@
       "phone": "Numéro de téléphone",
       "phoneNone": "Non connecté",
       "created": "Créé le",
-      "lastActive": "Dernière activité"
+      "lastActive": "Dernière activité",
+      "autoRejectCalls": "Rejeter automatiquement les appels",
+      "autoRejectCallsHint": "Les appels entrants sont refusés dès qu'ils sonnent. Le webhook call.received est tout de même émis avant. S'applique au prochain appel, aucun redémarrage nécessaire. Moteur Baileys uniquement : whatsapp-web.js ne peut pas refuser les appels."
+    },
+    "proxy": {
+      "title": "Configuration du proxy",
+      "status": "Actuel",
+      "enabled": "Utiliser un proxy",
+      "url": "URL du proxy",
+      "urlPlaceholder": "http://user:pass@proxy.example.com:8080",
+      "urlKeepPlaceholder": "Saisissez une nouvelle URL pour remplacer {{host}} (identifiants non affichés)",
+      "configured": "{{host}} ({{type}})",
+      "noProxy": "Aucun proxy configuré",
+      "hasCredentials": "Les identifiants sont enregistrés mais ne sont pas affichés. Saisissez une URL complète pour les modifier.",
+      "hint": "Les modifications s'appliquent au prochain démarrage de la session, pas à une connexion en cours. Le proxy doit être réel et joignable : une valeur injoignable bloque l'envoi du QR code. Avec whatsapp-web.js, le démarrage renvoie 504 ; avec Baileys, le démarrage réussit et la session continue de réessayer.",
+      "createHint": "Nécessaire uniquement si votre réseau ne peut pas joindre WhatsApp directement. Doit être un proxy réel et joignable.",
+      "invalidUrl": "Saisissez une URL de proxy http, https, socks4 ou socks5 valide.",
+      "saveSuccessTitle": "Proxy enregistré",
+      "saveSuccess": "Paramètres du proxy enregistrés. Ils s'appliquent au prochain démarrage de la session.",
+      "saveError": "Impossible d'enregistrer les paramètres du proxy"
     },
     "actions": {
       "view": "Voir",
+      "proxy": "Proxy",
       "start": "Démarrer",
       "stop": "Arrêter",
       "reconnect": "Reconnecter",
@@ -309,7 +530,8 @@
       "actionRequiredTitle": "Action requise",
       "actionRequiredDesc": "Cette session nécessite votre attention. Ouvrez la session pour voir quoi faire.",
       "failedTitle": "Échec de la session",
-      "failedDesc": "Le démarrage de la session WhatsApp a échoué. Ouvrez la session pour en voir la raison."
+      "failedDesc": "Le démarrage de la session WhatsApp a échoué. Ouvrez la session pour en voir la raison.",
+      "stopFailedTitle": "Échec de l'arrêt"
     },
     "card": {
       "phone": "Téléphone",
@@ -346,6 +568,7 @@
       "phoneLabel": "Numéro de téléphone",
       "phonePlaceholder": "ex. : 919876543210",
       "phoneHint": "Chiffres uniquement (sans +, espaces ni tirets) au format international (indicatif du pays + numéro).",
+      "relinkWarning": "Sur le moteur whatsapp-web.js, demander un code pour un numéro qui a déjà une session liée peut amener WhatsApp à dissocier cet appareil. Utilisez l'onglet QR si cette session doit rester active.",
       "invalidPhone": "Saisissez un numéro de téléphone valide : 6 à 15 chiffres, indicatif du pays en premier, sans symboles.",
       "generateButton": "Générer le code de liaison",
       "generating": "Génération du code de liaison...",
@@ -360,7 +583,8 @@
     },
     "start": {
       "teardownPendingTitle": "Démarrage de la session",
-      "teardownPending": "Un nettoyage d'identifiants pour cette session est encore en cours. Patientez un instant et réessayez."
+      "teardownPending": "Un nettoyage d'identifiants pour cette session est encore en cours. Patientez un instant et réessayez.",
+      "errorTitle": "Échec du démarrage"
     },
     "restriction": {
       "reachout_timelock": "Nouvelles discussions bloquées",
@@ -380,15 +604,19 @@
     "selectSession": "Sélectionner une session...",
     "session": "Session",
     "events": "Événements",
+    "noEvents": "Sélectionnez au moins un événement.",
     "available": "Événements disponibles",
     "saveChanges": "Enregistrer les modifications",
     "filters": {
       "title": "Filtres (facultatif)",
       "hint": "Déclencher uniquement lorsque toutes les conditions sont remplies. S'applique aux événements de message.",
+      "incomplete": "Attribuez une valeur à chaque condition de filtre et utilisez au plus 20 conditions, 100 valeurs par condition et 1000 caractères de texte.",
       "badge": "{{count}} filtre",
       "badge_other": "{{count}} filtres",
+      "badge_many": "{{count}} filtres",
       "addCondition": "Ajouter une condition",
       "removeCondition": "Supprimer la condition",
+      "removeValue": "Retirer {{value}}",
       "caseSensitive": "Sensible à la casse",
       "contactPlaceholder": "Numéro ou identifiant WhatsApp...",
       "textPlaceholder": "Texte à rechercher...",
@@ -398,9 +626,11 @@
       "fields": {
         "sender": "Expéditeur",
         "recipient": "Destinataire",
+        "chatId": "ID du chat",
         "body": "Corps du message",
         "type": "Type de message",
         "isGroup": "Est une discussion de groupe",
+        "kind": "Type de discussion",
         "fromMe": "Envoyé par moi",
         "hasMedia": "Contient un média",
         "mentions": "Mentions"
@@ -410,18 +640,22 @@
         "isNot": "n'est pas",
         "contains": "contient",
         "equals": "est égal à"
-      }
+      },
+      "fieldLabel": "Champ de filtre",
+      "operatorLabel": "Opérateur de filtre",
+      "valueLabel": "Valeur de filtre"
     },
     "columns": {
-      "url": "URL",
       "events": "Événements",
       "session": "Session",
-      "status": "Statut",
-      "actions": "Actions"
+      "status": "Statut"
     },
     "empty": {
       "title": "Aucun webhook configuré",
-      "description": "Ajoutez un webhook pour recevoir des notifications d'événements en temps réel"
+      "description": "Ajoutez un webhook pour recevoir des notifications d'événements en temps réel",
+      "loadErrorTitle": "Impossible de charger les webhooks",
+      "forbiddenTitle": "Aucun accès aux webhooks",
+      "forbiddenDesc": "Les webhooks nécessitent une clé API avec le rôle opérateur ou administrateur."
     },
     "toasts": {
       "created": "Webhook créé avec succès",
@@ -432,6 +666,7 @@
       "updateFailed": "Échec de la mise à jour du webhook : {{message}}",
       "testOk": "Test du webhook réussi ! Statut : {{status}}",
       "testFailed": "Test du webhook échoué : {{message}}",
+      "testStatus": "le destinataire a répondu HTTP {{status}}",
       "testError": "Impossible de tester le webhook : {{message}}"
     },
     "actions": {
@@ -442,10 +677,58 @@
     "eventDescriptions": {
       "message.received": "Lorsqu'un message est reçu",
       "message.sent": "Lorsqu'un message est envoyé",
-      "session.connected": "Lorsqu'une session se connecte",
-      "session.disconnected": "Lorsqu'une session se déconnecte",
+      "message.ack": "Lorsque l'état de remise ou de lecture d'un message change",
+      "message.receipt": "Chaque destinataire qui reçoit, lit ou écoute un message de groupe ou de statut que vous avez envoyé (Baileys uniquement ; non inclus dans *)",
+      "message.failed": "Lorsqu'un message sortant n'a pas pu être remis",
+      "message.revoked": "Lorsqu'un message est supprimé pour tout le monde",
+      "message.reaction": "Lorsqu'une réaction est ajoutée, modifiée ou retirée",
+      "message.edited": "Lorsqu'un message est modifié",
+      "session.status": "Lorsque l'état d'une session change",
       "session.qr": "Lorsqu'un code QR est généré",
-      "all": "Tous les événements"
+      "session.authenticated": "Lorsqu'une session est associée et prête",
+      "session.disconnected": "Lorsqu'une session se déconnecte",
+      "session.reconnect_loop": "Lorsqu'une session échoue à se reconnecter à plusieurs reprises",
+      "session.restriction": "Lorsque WhatsApp restreint le compte ou lève une restriction",
+      "presence.update": "Lorsqu'un chat suivi passe en ligne, écrit ou se déconnecte",
+      "event.response": "Lorsqu'un invité répond à un événement WhatsApp (participe, ne participe pas, peut-être)",
+      "poll.vote": "Lorsqu'un participant coche ou décoche des options d'un sondage (whatsapp-web.js)",
+      "group.join": "Lorsque des participants rejoignent un groupe ou y sont ajoutés",
+      "group.leave": "Lorsque des participants quittent un groupe ou en sont retirés",
+      "group.update": "Lorsque le nom, la description ou les paramètres d'un groupe changent",
+      "group.join_request": "Lorsque quelqu'un demande à rejoindre un groupe administré par cette session",
+      "call.received": "Lorsqu'un appel entrant commence à sonner",
+      "call.accepted": "Lorsqu'un appel est décroché",
+      "call.rejected": "Lorsqu'un appel est refusé",
+      "call.missed": "Lorsqu'un appel reste sans réponse",
+      "status.received": "Lorsqu'un contact publie un statut",
+      "all": "Tous les événements sauf message.receipt, qui doit être indiqué explicitement"
+    },
+    "auth": {
+      "title": "Authentification des livraisons",
+      "hint": "Facultatif. Les valeurs enregistrées ne sont plus jamais affichées.",
+      "editHint": "Le secret et les en-têtes enregistrés ne sont jamais affichés. Laissez cette section intacte pour les conserver.",
+      "secret": "Secret de signature",
+      "secretHint": "De 16 à 255 caractères. Chaque livraison porte une signature HMAC-SHA256 dans l'en-tête X-OpenWA-Signature.",
+      "secretKeepPlaceholder": "Laissez vide pour conserver le secret actuel",
+      "generateSecret": "Générer",
+      "copySecret": "Copier",
+      "secretCopied": "Secret de signature copié",
+      "removeSecret": "Ne plus signer les livraisons (supprimer le secret)",
+      "headers": "En-têtes personnalisés",
+      "headerName": "Nom de l'en-tête",
+      "headerValue": "Valeur de l'en-tête",
+      "addHeader": "Ajouter un en-tête",
+      "removeHeader": "Retirer l'en-tête",
+      "replaceHeaders": "Remplacer les en-têtes personnalisés",
+      "replaceHint": "Ces lignes remplacent tous les en-têtes enregistrés. Sans ligne, les en-têtes enregistrés sont supprimés.",
+      "errors": {
+        "headerName": "Les noms d'en-tête ne peuvent contenir que des lettres, des chiffres et des tirets.",
+        "headerValue": "Les valeurs d'en-tête sont limitées à 1024 caractères, sans caractères de contrôle ni caractères hors Latin-1.",
+        "headerReserved": "Content-Type, User-Agent, X-OpenWA-* et les en-têtes de connexion sont définis par la passerelle et ne peuvent pas être utilisés.",
+        "headerDuplicate": "Chaque nom d'en-tête ne peut être utilisé qu'une seule fois.",
+        "tooMany": "50 en-têtes personnalisés au maximum sont autorisés.",
+        "secretLength": "Le secret de signature doit comporter entre 16 et 255 caractères."
+      }
     }
   },
   "templates": {
@@ -479,9 +762,13 @@
     },
     "empty": {
       "title": "Aucun template enregistré",
+      "noMatch": "Aucun template ne correspond à votre recherche.",
       "description": "Créez un template réutilisable pour accélérer vos réponses et notifications courantes.",
       "noSessionsTitle": "Aucune session disponible",
-      "noSessionsDesc": "Créez une session WhatsApp avant d'ajouter des templates."
+      "noSessionsDesc": "Créez une session WhatsApp avant d'ajouter des templates.",
+      "loadErrorTitle": "Impossible de charger les templates",
+      "forbiddenTitle": "Aucun accès aux templates",
+      "forbiddenDesc": "Les templates nécessitent une clé API avec le rôle opérateur ou administrateur."
     },
     "toasts": {
       "created": "Template créé avec succès",
@@ -491,7 +778,8 @@
       "deleted": "Template supprimé avec succès",
       "deleteFailed": "Échec de la suppression du template : {{message}}",
       "copied": "Nom du template copié"
-    }
+    },
+    "sessionSelect": "Session"
   },
   "apiKeys": {
     "title": "Clés API",
@@ -500,7 +788,9 @@
     "modalTitle": "Créer une clé API",
     "createdTitle": "Clé API créée",
     "createdHint": "Copiez cette clé maintenant. Vous ne pourrez plus la revoir.",
+    "copyKey": "Copier la clé",
     "namePlaceholder": "ex : Clé de Production",
+    "nameTooShort": "Utilisez au moins 3 caractères.",
     "rolesTitle": "Référence des rôles",
     "roles": {
       "admin": "Administrateur",
@@ -518,15 +808,21 @@
       "role": "Rôle",
       "status": "Statut",
       "lastUsed": "Dernière utilisation",
-      "actions": "Actions"
+      "actions": "Actions",
+      "sessions": "Sessions",
+      "restrictions": "Restrictions"
     },
     "statuses": {
       "active": "Active",
-      "revoked": "Révoquée"
+      "revoked": "Révoquée",
+      "expired": "Expirée"
     },
     "empty": {
       "title": "Aucune clé API créée",
-      "description": "Créez une clé API pour authentifier vos requêtes"
+      "description": "Créez une clé API pour authentifier vos requêtes",
+      "loadErrorTitle": "Impossible de charger les clés API",
+      "forbiddenTitle": "Aucun accès aux clés API",
+      "forbiddenDesc": "La gestion des clés API nécessite une clé administrateur qui n'est pas limitée à des sessions précises."
     },
     "confirm": {
       "deleteTitle": "Supprimer la clé API",
@@ -537,9 +833,48 @@
       "revoke": "Révoquer"
     },
     "actions": {
-      "copy": "Copier",
       "revoke": "Révoquer",
-      "delete": "Supprimer"
+      "delete": "Supprimer",
+      "edit": "Modifier l'accès"
+    },
+    "sessions": {
+      "label": "Accès aux sessions",
+      "hint": "Sélectionnez les sessions que cette clé peut utiliser.",
+      "all": "Toutes les sessions",
+      "empty": "Aucune session pour le moment. Cette clé pourra accéder à toutes dès qu’il y en aura.",
+      "restricted": "{{count}} sélectionnées",
+      "save": "Enregistrer",
+      "choose": "Choisir des sessions",
+      "leaveAll": "Laisser pour toutes les sessions"
+    },
+    "edit": {
+      "title": "Modifier l'accès de la clé",
+      "signedIn": "Ce tableau de bord est connecté avec cette clé. Modifier son rôle, ses adresses IP, ses discussions ou son expiration peut vous déconnecter."
+    },
+    "restrictions": {
+      "none": "Aucune",
+      "ips": "IP : {{count}}",
+      "chats": "Discussions : {{count}}",
+      "expires": "Expire le {{date}}",
+      "expired": "Expirée le {{date}}"
+    },
+    "ips": {
+      "label": "Adresses IP autorisées (facultatif)",
+      "hint": "Une adresse IP ou une plage CIDR par ligne. Laissez vide pour accepter toute adresse.",
+      "invalid": "Ni une adresse IPv4 ni une plage CIDR : {{value}}"
+    },
+    "chats": {
+      "label": "Accès aux discussions (facultatif)",
+      "hint": "Une discussion par ligne : un ID de groupe se terminant par @g.us, un ID de contact se terminant par @c.us ou @lid, ou un numéro de téléphone. Laissez vide pour toutes les discussions. Une clé limitée à des discussions ne peut utiliser que les routes ouvertes à ce type de clé ; son accès par le WebSocket des événements et MCP reste limité à ces discussions.",
+      "lidHint": "Une entrée @lid admet aussi le numéro de téléphone qui lui est actuellement associé. Si ce numéro passe à quelqu'un d'autre, cette clé peut l'atteindre : vérifiez la clé quand un contact change de numéro.",
+      "invalid": "Ni un ID de discussion ni un numéro de téléphone : {{value}}",
+      "tooMany": "Trop de discussions ({{count}}) : une clé peut en lister au plus {{max}}."
+    },
+    "expiry": {
+      "label": "Expire le (facultatif)",
+      "hint": "Dans le fuseau horaire de ce navigateur. Laissez vide pour une clé qui n'expire jamais.",
+      "clear": "Retirer l'expiration",
+      "invalid": "Saisissez une date et une heure complètes, au plus tard en l'an 9999, ou videz le champ pour une clé qui n'expire jamais."
     }
   },
   "logs": {
@@ -563,8 +898,16 @@
     },
     "empty": {
       "title": "Aucun journal trouvé",
-      "description": "Les journaux d'audit apparaîtront ici au fur et à mesure des actions"
-    }
+      "description": "Les journaux d'audit apparaîtront ici au fur et à mesure des actions",
+      "filteredTitle": "Aucune correspondance sur cette page",
+      "filteredDescription": "La recherche ne filtre que la page actuelle. Effacez-la, naviguez entre les pages ou utilisez le filtre de gravité côté serveur.",
+      "filteredServerDescription": "Aucun journal ne correspond à ces filtres. Ajustez le filtre de gravité pour élargir la recherche."
+    },
+    "exportFailed": "Impossible d'exporter le journal d'audit",
+    "exportTruncated": "L'export ne couvre que les {{rows}} entrées les plus récentes. Affinez le filtre de gravité pour exporter les plus anciennes.",
+    "exportThrottled": "L'export ne couvre que les {{rows}} entrées les plus récentes, car la passerelle limite les lectures du journal d'audit. Attendez une minute, puis relancez l'export.",
+    "exportNoMatches": "Aucune entrée du journal d'audit ne correspond à la recherche : rien n'a été exporté.",
+    "exportNoMatchesTruncated": "Aucune des {{rows}} entrées les plus récentes parcourues ne correspond à la recherche : rien n'a été exporté. Les entrées plus anciennes n'ont pas été parcourues."
   },
   "messageTester": {
     "title": "Testeur de messages",
@@ -582,6 +925,12 @@
     "loadingGroups": "Chargement des groupes...",
     "noGroupsFound": "Aucun groupe trouvé",
     "selectGroupHint": "Sélectionnez un groupe depuis votre WhatsApp",
+    "selectAllGroups": "Tout sélectionner",
+    "selectMatchingGroups": "Sélectionner les résultats",
+    "clearGroupSelection": "Effacer",
+    "groupsSelectedCount": "Sélectionnés : {{count}}/{{max}}",
+    "noGroupsMatch": "Aucun groupe ne correspond à votre recherche",
+    "forwardUsesFirstGroup": "Le transfert n'utilise que le premier groupe sélectionné, comme discussion d'origine.",
     "phoneHint": "Utilisez le format international sans espaces",
     "messageType": "Type de message",
     "types": {
@@ -605,6 +954,7 @@
     "removeFile": "Supprimer le fichier",
     "fileReadError": "Échec de lecture du fichier",
     "fileTooLarge": "Le fichier est trop volumineux (max 18 Mo)",
+    "recipientsFileTooLarge": "Le fichier de destinataires est trop volumineux (max 2 Mo)",
     "caption": "Légende",
     "filename": "Nom du fichier",
     "captionPlaceholder": "Entrez une légende...",
@@ -632,25 +982,40 @@
     "forwardMessageId": "ID du message",
     "forwardMessageIdHint": "ID du message à transférer",
     "bulkRecipients": "Destinataires",
+    "bulkRecipientsUpload": "Téléverser CSV/TXT",
     "bulkRecipientsPlaceholder": "+62812345678",
     "bulkRecipientsHint": "Un numéro de téléphone ou ID de chat par ligne (max 100)",
     "bulkRecipientsCount": "Destinataires : {{count}}",
     "bulkDelay": "Délai entre les messages (ms)",
     "bulkDelayHint": "1000–60000 ms (par défaut : 3000)",
+    "bulkMediaKind": "Envoyer en tant que",
+    "bulkMediaHint": "Avec une pièce jointe, le message devient sa légende. Un fichier sélectionné est envoyé dans la requête elle-même : pour un gros fichier et de nombreux destinataires, utilisez plutôt une URL de média publique.",
+    "bulkMediaTooLarge": "Ce fichier est trop volumineux pour être envoyé directement à {{count}} destinataires : à ce nombre, chaque fichier peut faire au maximum {{size}}. Utilisez plutôt une URL de média publique ou envoyez à moins de destinataires.",
+    "bulkMediaUrlInvalid": "Saisissez une adresse complète en http:// ou https://, par exemple https://example.com/file.pdf.",
+    "bulkCaptionTooLong": "Avec une pièce jointe, le message est envoyé comme sa légende, limitée à {{max}} caractères ({{count}} actuellement).",
+    "bulkAudioNoCaption": "L'audio est envoyé sans légende, ce texte ne serait donc pas envoyé. Videz le message ou choisissez un autre type.",
     "send": "Envoyer le message",
     "sending": "Envoi...",
+    "sendingProgress": "Envoi {{current}}/{{total}}...",
     "viewOnly": "Lecture seule",
     "responseEmpty": "Envoyez un message pour voir la réponse de l'API",
     "successLabel": "Succès",
     "failedLabel": "Échec",
+    "groupsSentSummary": "{{sent}}/{{total}} envoyés",
+    "groupSendCancelled": "{{count}}, annulés",
+    "groupSendStopped": "{{count}}, arrêté après HTTP {{status}}",
+    "groupSendStoppedNoAnswer": "{{count}}, arrêté : la passerelle n'a pas répondu",
     "response": {
       "timestamp": "Horodatage",
       "messageId": "ID du message",
       "batchId": "ID du lot",
-      "error": "Erreur"
+      "error": "Erreur",
+      "groups": "Groupes",
+      "notSent": "Non envoyés"
     },
     "sendFailed": "Échec de l'envoi du message",
     "notOnWhatsApp": "Ce numéro n'est pas enregistré sur WhatsApp",
+    "tooLong": "Plus de {{max}} chiffres ne forment pas un seul numéro. Saisissez un seul numéro.",
     "batch": {
       "status": {
         "pending": "En attente",
@@ -662,6 +1027,126 @@
       "progress": "Envoyés {{sent}} sur {{total}} · {{failed}} échoués · {{pending}} en attente",
       "cancel": "Annuler le lot",
       "cancelling": "Annulation..."
+    }
+  },
+  "numberChecker": {
+    "subtitle": "Vérifiez discrètement si des numéros de téléphone ont un compte WhatsApp actif, sans envoyer de message",
+    "zeroMessages": "Aucun message envoyé",
+    "noSession": {
+      "title": "Aucune session WhatsApp active n'est connectée.",
+      "desc": "Pour vérifier des numéros de téléphone, OpenWA nécessite au moins une session authentifiée.",
+      "goToSessions": "Aller aux sessions"
+    },
+    "tabs": {
+      "single": "Vérification individuelle",
+      "bulk": "Vérification en masse"
+    },
+    "session": {
+      "label": "Session WhatsApp",
+      "none": "Aucune session prête disponible",
+      "hint": "Les requêtes passent par ce compte WhatsApp connecté."
+    },
+    "single": {
+      "title": "Vérifier un compte",
+      "phoneLabel": "Numéro de téléphone",
+      "phonePlaceholder": "ex. : 919876543210 ou 6281234567890",
+      "check": "Vérifier",
+      "checking": "Vérification...",
+      "tooLong": "Plus de {{max}} chiffres ne forment pas un seul numéro. Vérifiez un numéro à la fois.",
+      "autoPrefix": "Préfixer automatiquement par <strong>+91</strong> les numéros à 10 chiffres (les numéros à 12 chiffres restent inchangés)",
+      "silent": "<strong>Totalement silencieux :</strong> cette requête interroge directement le registre des numéros enregistrés de WhatsApp. Le contact ne reçoit ni notification, ni son, ni message.",
+      "resultTitle": "Résultat de la vérification",
+      "querying": "Interrogation des serveurs WhatsApp...",
+      "empty": "Saisissez un numéro de téléphone et cliquez sur « Vérifier » pour voir son statut WhatsApp."
+    },
+    "preview": {
+      "prefixed": "Numéro à vérifier : <strong>+{{number}}</strong> (10 chiffres → préfixe 91 ajouté automatiquement)",
+      "kept": "Numéro à vérifier : <strong>+{{number}}</strong> (12 chiffres → conservé tel quel)",
+      "digits": "Numéro à vérifier : <strong>+{{number}}</strong> ({{digits}} chiffres)"
+    },
+    "prefixHint": {
+      "single": "Ajoute +91 aux numéros à 10 chiffres et à ceux à 11 chiffres commençant par 0. Les numéros avec + ou 00 restent tels que saisis.",
+      "bulk": "Ajoute +91 aux numéros à 10 chiffres (par exemple 96...) et à ceux à 11 chiffres commençant par 0. Les numéros avec + ou 00 restent tels que saisis.",
+      "off": "Les numéros sont vérifiés tels que saisis, chiffres uniquement : indiquez donc l'indicatif du pays."
+    },
+    "result": {
+      "registered": "Enregistré sur WhatsApp",
+      "notRegistered": "Non enregistré",
+      "avatarAlt": "Avatar",
+      "status": "Statut",
+      "active": "Compte actif",
+      "none": "Aucun compte trouvé",
+      "jid": "JID WhatsApp",
+      "copyJid": "Copier le JID",
+      "copy": "Copier",
+      "copied": "Copié",
+      "checkedAt": "Vérifié à",
+      "openTester": "Aller au testeur de messages"
+    },
+    "recent": {
+      "title": "Vérifications récentes",
+      "clear": "Effacer l'historique"
+    },
+    "table": {
+      "phone": "Numéro de téléphone",
+      "status": "Statut WhatsApp",
+      "id": "ID WhatsApp",
+      "time": "Heure"
+    },
+    "status": {
+      "registered": "Enregistré",
+      "unregistered": "Non enregistré",
+      "notRegistered": "Non enregistré",
+      "failed": "Échec"
+    },
+    "bulk": {
+      "title": "Vérification de numéros en masse",
+      "delayLabel": "Délai de sécurité entre les vérifications (ms)",
+      "delay1": "1000 ms / 1 s (recommandé)",
+      "delay2": "2000 ms / 2 s (très sûr)",
+      "delay3": "3000 ms / 3 s (sûr pour les gros volumes)",
+      "delayHint": "Attend entre chaque vérification pour rester sous la limite de requêtes de la passerelle (100 par minute par défaut). La vérification s'arrête si la passerelle refuse d'autres requêtes.",
+      "countryRule": "Règle d'indicatif du pays",
+      "autoPrefix": "Préfixer automatiquement par <strong>+91</strong> (Inde) les numéros à 10 chiffres",
+      "numbersLabel": "Numéros à vérifier (un par ligne ou séparés par des virgules)",
+      "numbersHint": "Collez des numéros de téléphone avec l'indicatif du pays, un par ligne ou séparés par des virgules. {{max}} numéros maximum par exécution.",
+      "parsed": "<strong>{{count}}</strong> numéro unique détecté",
+      "parsed_other": "<strong>{{count}}</strong> numéros uniques détectés",
+      "parsed_many": "<strong>{{count}}</strong> numéros uniques détectés",
+      "tenDigitAdded": "({{ten}} à dix chiffres → +91 ajouté)",
+      "tenDigitAddedPreserved": "({{ten}} à dix chiffres → +91 ajouté, {{twelve}} à douze chiffres sans changement)",
+      "tooMany": "Trop de numéros : {{parsed}} détectés, {{max}} maximum par exécution. Retirez-en {{excess}} pour démarrer.",
+      "tooLong": "Ignorés, plus de {{max}} chiffres (pas un seul numéro) : {{count}}. Mettez chaque numéro sur sa propre ligne.",
+      "start": "Démarrer la vérification par lot",
+      "stop": "Arrêter la vérification",
+      "export": "Exporter les résultats (CSV)",
+      "exportHint": "Le fichier contient tous les chiffres. Un tableur peut afficher les longs numéros sous la forme 9.19612E+11 ou supprimer un zéro initial ; importez le fichier et réglez la colonne Phone Number sur Texte pour les conserver tels quels.",
+      "stoppedTitle": "Lot arrêté",
+      "checked": "Vérifiés",
+      "remaining": "Restants",
+      "all": "Tous"
+    },
+    "stopped": {
+      "reason409": "La session n'est pas connectée",
+      "reason429": "La limite de requêtes de la passerelle a été atteinte",
+      "reason503": "WhatsApp n'a pas répondu à une requête",
+      "reasonOther": "La passerelle a refusé une requête",
+      "partial": "{{reason}} (HTTP {{status}}). Arrêt au numéro {{attempted}} sur {{total}} ; {{count}} numéro n'a pas été vérifié. Réessayez plus tard.",
+      "partial_other": "{{reason}} (HTTP {{status}}). Arrêt au numéro {{attempted}} sur {{total}} ; {{count}} numéros n'ont pas été vérifiés. Réessayez plus tard.",
+      "partial_many": "{{reason}} (HTTP {{status}}). Arrêt au numéro {{attempted}} sur {{total}} ; {{count}} numéros n'ont pas été vérifiés. Réessayez plus tard.",
+      "noAnswer": "La passerelle n'a pas répondu. Arrêt au numéro {{attempted}} sur {{total}}. Réessayez plus tard.",
+      "last": "{{reason}} (HTTP {{status}}). La dernière requête a échoué. Réessayez plus tard."
+    },
+    "toast": {
+      "enterNumber": "Veuillez saisir un numéro de téléphone à vérifier.",
+      "noSession": "Aucune session WhatsApp prête disponible.",
+      "checkFailed": "Échec de la vérification",
+      "unknownError": "Erreur inconnue lors de la requête",
+      "lookupFailed": "Échec de la requête",
+      "enterNumbers": "Veuillez saisir des numéros de téléphone valides (un par ligne ou séparés par des virgules).",
+      "completed": "Vérification de {{count}} numéro terminée.",
+      "completed_other": "Vérification de {{count}} numéros terminée.",
+      "completed_many": "Vérification de {{count}} numéros terminée."
     }
   },
   "infrastructure": {
@@ -686,7 +1171,7 @@
       "sslRejectUnauthorized": "Vérifier le certificat SSL",
       "sslRejectUnauthorizedDesc": "Rejeter les certificats auto-signés ou non valides. Désactivez cette option pour les bases Postgres gérées avec des certificats auto-signés (Supabase, Heroku, Render, Railway).",
       "migrationsTitle": "Migrations de base de données",
-      "migrationsStatus": "Le schéma est auto-synchronisé avec TypeORM",
+      "migrationsStatus": "Les migrations en attente sont appliquées automatiquement au démarrage",
       "migrationsHint": "Les migrations sont gérées automatiquement. Utilisez la CLI pour les migrations manuelles."
     },
     "engine": {
@@ -709,7 +1194,7 @@
     "redis": {
       "title": "Redis",
       "enable": "Activer Redis",
-      "enableDesc": "Requis pour le cache, le stockage des sessions et les files d'attente BullMQ",
+      "enableDesc": "Utilisé pour le cache, les files d'attente BullMQ, les compteurs de limitation de débit et la diffusion WebSocket multi-nœuds",
       "useBuiltIn": "Utiliser le conteneur Redis intégré",
       "builtInDesc": "OpenWA gérera un conteneur Redis pour vous",
       "queueTitle": "Activer le système de file d'attente BullMQ",
@@ -721,7 +1206,7 @@
       "failed": "Échoué",
       "viewBullMq": "Voir le tableau de bord Bull MQ",
       "disabledTitle": "Redis est désactivé",
-      "disabledDesc": "Activez Redis pour le cache, le stockage des sessions et les files d'attente de messages BullMQ.",
+      "disabledDesc": "Activez Redis pour le cache, les files d'attente de messages BullMQ, les compteurs de limitation de débit et la diffusion WebSocket multi-nœuds.",
       "passwordOptional": "(optionnel)",
       "bullMqUrlCopied": "URL du tableau de bord Bull MQ copiée",
       "bullMqUrlHint": "Ouvrez-le avec une clé d'API ADMIN — un onglet de navigateur ne peut pas s'authentifier."
@@ -755,37 +1240,45 @@
       "successTitle": "✅ Serveur prêt",
       "errorTitle": "❌ Échec du redémarrage",
       "idleDesc": "La configuration a été enregistrée dans <code>.env.generated</code>.<br/>Un redémarrage du serveur est nécessaire pour appliquer les modifications.",
+      "stopsContainers": "Le redémarrage arrêtera aussi ces conteneurs intégrés, qui gardent leurs données et ne sont pas supprimés :",
       "later": "Redémarrer plus tard",
       "now": "Redémarrer maintenant",
       "restartingMsg": "Redémarrage du serveur... {{count}}s",
       "checking": "Vérification du statut du serveur...",
       "dontClose": "Veuillez ne pas fermer cette fenêtre",
       "successMsg": "Le serveur est de nouveau en ligne ! La page va se recharger automatiquement.",
-      "errorMsg": "Le serveur n'a pas répondu après 30 secondes. Veuillez vérifier les journaux Docker et redémarrer manuellement.",
+      "errorMsg": "Le serveur n'a pas répondu. Veuillez vérifier les journaux Docker et redémarrer manuellement.",
+      "outcomeUnknown": "Le proxy a renvoyé une erreur avant que le serveur ne réponde ; on ne sait donc pas si le redémarrage est en cours. Rechargez la page dans une minute pour vérifier.",
       "reload": "Recharger la page"
     },
     "toasts": {
       "saveFailed": "Échec de l'enregistrement"
     },
     "envPinNote": "Défini par la variable d'environnement {{name}} — c'est la valeur en cours d'exécution ; les modifications du tableau de bord ne s'appliqueront pas tant que cette variable n'est pas supprimée.",
+    "envPinFlagNote": "Défini par la variable d'environnement {{name}} : tant qu'elle vaut true et que ce service est utilisé, le conteneur intégré est lancé à chaque démarrage du serveur, même si cet interrupteur est désactivé.",
     "pendingRestartNote": "Enregistré, mais pas encore appliqué — redémarrez le serveur pour que cette modification prenne effet.",
+    "pendingBuiltInNote": "Enregistré, mais pas encore appliqué : le serveur utilise actuellement un service externe, et un redémarrage le basculera vers le conteneur intégré.",
+    "pendingExternalNote": "Enregistré, mais pas encore appliqué : le serveur utilise actuellement le conteneur intégré, et un redémarrage le basculera vers un service externe.",
     "migration": {
       "title": "Attention — cela change le backend de données",
       "dbWarning": "La nouvelle base de données démarre vide. Téléchargez dès maintenant une sauvegarde de vos données actuelles (tant que vous êtes encore sur l'ancienne base de données), puis restaurez-la après le redémarrage.",
       "storageWarning": "Les fichiers multimédias existants ne sont pas déplacés automatiquement vers le nouveau backend de stockage ; ils resteront à leur ancien emplacement.",
       "downloadBackup": "Télécharger d'abord la sauvegarde",
       "backupTitle": "Sauvegarde et restauration des données",
-      "backupHint": "Exportez toutes les données au format JSON avant de changer de base de données, puis importez-les après le changement. La sauvegarde contient les secrets de webhook et les identifiants de proxy en clair — conservez-la de manière sécurisée et supprimez-la après la restauration.",
+      "backupHint": "Exportez toutes les données au format JSON avant de changer de base de données, puis importez-les après le changement. Les secrets de signature des webhooks, les en-têtes personnalisés des webhooks et les identifiants de proxy ne sont pas inclus ; saisissez-les à nouveau après la restauration. Les secrets et paramètres des instances d'intégration sont inclus en clair : conservez le fichier de manière sécurisée et supprimez-le après la restauration.",
       "export": "Exporter les données",
       "import": "Importer les données",
       "exportFailed": "Impossible d'exporter les données",
+      "exportPartialTitle": "Il manque des médias dans la sauvegarde",
+      "exportPartial": "Pièces jointes au-delà de la limite de médias de l'exportation : {{count}}. Elles ont été enregistrées comme espaces réservés. Les messages sont restaurés ; leurs médias ne le sont pas.",
       "importFailed": "Impossible d'importer les données",
       "importOk": "Données importées",
       "importConfirm": "L'importation REMPLACERA toutes les données actuelles par la sauvegarde ({{rows}} lignes). Cette action est irréversible. Continuer ?",
       "invalidFile": "Ce fichier n'est pas une sauvegarde de données OpenWA valide.",
       "importTooLarge": "La sauvegarde dépasse la limite de la requête. Augmentez BODY_SIZE_LIMIT sur le serveur, puis réessayez."
     },
-    "statusLoadError": "Impossible de charger l'état actuel de l'infrastructure. Actualisez pour réessayer."
+    "statusLoadError": "Impossible de charger l'état actuel de l'infrastructure. Actualisez pour réessayer.",
+    "configLoadError": "Impossible de charger la configuration enregistrée, elle ne peut donc pas être modifiée ici. Actualisez pour réessayer."
   },
   "plugins": {
     "title": "Plugins",
@@ -793,6 +1286,19 @@
     "refresh": "Actualiser",
     "builtIn": "Intégré",
     "noDescription": "Aucune description disponible",
+    "statuses": {
+      "installed": "Installé",
+      "enabled": "Activé",
+      "disabled": "Désactivé",
+      "error": "Erreur"
+    },
+    "types": {
+      "engine": "Moteur",
+      "storage": "Stockage",
+      "queue": "File d'attente",
+      "auth": "Auth",
+      "extension": "Extension"
+    },
     "enable": "Activer",
     "disable": "Désactiver",
     "healthCheck": "Bilan de santé",
@@ -807,7 +1313,7 @@
     "config": {
       "title": "Configurer {{name}}",
       "noOptions": "Aucune option de configuration disponible pour ce plugin",
-      "uiHandshakeError": "L’interface de configuration du plugin ne s’est pas initialisée. Utilisez le formulaire ci-dessous s’il est disponible.",
+      "uiHandshakeError": "L’interface de configuration du plugin ne s’est pas initialisée.",
       "save": "Enregistrer la configuration",
       "addItem": "Ajouter",
       "tabConfig": "Configuration",
@@ -822,6 +1328,7 @@
     "installModal": {
       "title": "Installer un plugin",
       "hint": "Téléversez un plugin empaqueté au format .zip (avec un manifest.json). Il s'exécute en bac à sable une fois activé.",
+      "trustWarning": "Les plugins s'exécutent avec tous les privilèges du processus de la passerelle — le bac à sable contient les plantages, pas le code malveillant. N'installez que des plugins de confiance.",
       "choose": "Choisir un fichier .zip…",
       "tooLarge": "Le fichier dépasse la limite de 5 MB.",
       "catalogHint": "Installez directement depuis le catalogue de plugins OpenWA. Le .zip est récupéré côté serveur via la protection SSRF, puis validé et exécuté en sandbox.",
@@ -837,7 +1344,7 @@
       "healthFail": "Bilan de santé échoué",
       "healthError": "Erreur lors du bilan de santé",
       "savedTitle": "Configuration enregistrée",
-      "savedDesc": "Redémarrage du serveur requis pour appliquer les modifications.",
+      "savedDesc": "Les modifications prennent effet sans redémarrage du serveur.",
       "saveFailed": "Échec de l'enregistrement",
       "installed": "Plugin installé",
       "installFailed": "Échec de l'installation",
@@ -889,7 +1396,8 @@
         "title": "Instance créée",
         "hint": "Copiez le secret maintenant — il ne sera affiché qu'une seule fois.",
         "secret": "Secret de signature",
-        "ingressUrls": "URL(s) d'entrée"
+        "ingressUrls": "URL(s) d'entrée",
+        "verifyToken": "Jeton de vérification"
       },
       "regenerate": {
         "title": "Régénérer le secret",
@@ -941,7 +1449,7 @@
   },
   "search": {
     "placeholder": "Rechercher des messages…",
-    "results": "{{count}} résultats",
+    "loadMore": "Afficher plus ({{shown}} sur {{total}})",
     "empty": "Aucun message trouvé.",
     "error": "Échec de la recherche. Réessayez.",
     "unavailable": "La recherche n'est pas configurée.",

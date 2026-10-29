@@ -35,10 +35,14 @@ describe('feature-flags', () => {
       }
     });
 
-    it('parses simulateTypingMaxMs with Number()||5000 semantics (0/negative/non-numeric fall back)', () => {
+    it('reads simulateTypingMaxMs as a positive integer (0, negative and non-numeric values fall back to 5000)', () => {
       expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: '3000' }).simulateTypingMaxMs).toBe(3000);
-      // Critical: "0" must fall back to 5000 (Number('0')||5000), NOT stay 0 as parseInt would.
+      expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: '1' }).simulateTypingMaxMs).toBe(1);
+      // Critical: "0" must fall back to 5000, NOT stay 0 as parseInt would.
       expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: '0' }).simulateTypingMaxMs).toBe(5000);
+      // A negative cap would reach setTimeout and shrink the humanising pause to about 1 ms.
+      expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: '-1' }).simulateTypingMaxMs).toBe(5000);
+      expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: '-5' }).simulateTypingMaxMs).toBe(5000);
       expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: '' }).simulateTypingMaxMs).toBe(5000);
       expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: 'abc' }).simulateTypingMaxMs).toBe(5000);
       expect(computeFeatureFlags({ SIMULATE_TYPING_MAX_MS: undefined }).simulateTypingMaxMs).toBe(5000);
@@ -89,12 +93,13 @@ describe('feature-flags', () => {
   // service, never on a datastore/proxy service.
   describe('bundled compose forwards the plugin redirect policy', () => {
     // Extract the body of one top-level service block. Compose indents a service's keys two spaces
-    // under the `name:` key, so the block runs from `  serviceName:` to the next top-level key.
+    // under the `name:` key, so the block runs from `  serviceName:` to the next sibling service or
+    // top-level key, whichever comes first.
     function extractTopLevelService(compose: string, serviceName: string): string {
       const start = compose.indexOf(`\n  ${serviceName}:\n`);
       if (start === -1) throw new Error(`service ${serviceName} not found`);
       const rest = compose.slice(start + 1);
-      const next = rest.search(/\n[a-z]/);
+      const next = rest.search(/\n(?: {2})?[a-z]/);
       return next === -1 ? rest : rest.slice(0, next);
     }
 
@@ -104,6 +109,8 @@ describe('feature-flags', () => {
     ])('%s forwards the redirect flag on service %s', (file, serviceName) => {
       const compose = fs.readFileSync(path.join(__dirname, '../../', file), 'utf8');
       const service = extractTopLevelService(compose, serviceName);
+      // The block holds only this service: no sibling service header may follow its own.
+      expect(service.split('\n').filter(line => /^ {2}[a-z]/.test(line))).toEqual([`  ${serviceName}:`]);
       expect(service).toContain(
         'PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS=${PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS:-false}',
       );

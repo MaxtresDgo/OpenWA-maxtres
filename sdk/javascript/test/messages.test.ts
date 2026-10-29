@@ -1,10 +1,100 @@
-import { describe, expect, it } from 'vitest';
-import { OpenWAClient } from '../src';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import { OpenWAClient, type BatchCancelResponse } from '../src';
 import { MockTransport } from './helpers';
 
 function client(t: MockTransport): OpenWAClient {
   return new OpenWAClient({ baseUrl: 'http://x', apiKey: 'k', fetch: t.asFetch() });
 }
+
+it('preserves message-time filters and the unknown timestamp count', async () => {
+  const t = new MockTransport().on('GET', /\/messages$/, { body: { messages: [], total: 0, unknownTimestampTotal: 2 } });
+  const page = await client(t).messages.list('s', {
+    since: 1789855200000.5, until: 1789941600000, direction: 'incoming',
+    orderBy: 'timestamp', type: 'image', messageId: 'M1',
+  });
+  const query = new URL(t.lastCall!.url).searchParams;
+  expect(query.get('since')).toBe('1789855200000.5');
+  expect(query.get('until')).toBe('1789941600000');
+  expect(query.get('direction')).toBe('incoming');
+  expect(query.get('orderBy')).toBe('timestamp');
+  expect(query.get('type')).toBe('image');
+  expect(query.get('messageId')).toBe('M1');
+  expect(page.unknownTimestampTotal).toBe(2);
+});
+
+describe('MessagesResource idempotency keys', () => {
+  const sends: Array<[string, (c: OpenWAClient, key?: string) => Promise<unknown>]> = [
+    ['send-text', (c, key) => c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi', mentions: ['1@c.us'] }, key)],
+    ['send-image', (c, key) => c.messages.sendImage('s', { chatId: 'c@c.us', url: 'http://image', caption: 'image' }, key)],
+    ['send-video', (c, key) => c.messages.sendVideo('s', { chatId: 'c@c.us', url: 'http://video', caption: 'video' }, key)],
+    ['send-audio', (c, key) => c.messages.sendAudio('s', { chatId: 'c@c.us', url: 'http://audio', ptt: true }, key)],
+    ['send-document', (c, key) => c.messages.sendDocument('s', { chatId: 'c@c.us', base64: 'YQ==', mimetype: 'application/pdf', filename: 'a.pdf' }, key)],
+    ['send-sticker', (c, key) => c.messages.sendSticker('s', { chatId: 'c@c.us', url: 'http://sticker', mimetype: 'image/webp' }, key)],
+    ['send-location', (c, key) => c.messages.sendLocation('s', { chatId: 'c@c.us', latitude: 1, longitude: 2 }, key)],
+    ['send-contact', (c, key) => c.messages.sendContact('s', { chatId: 'c@c.us', contactName: 'A', contactNumber: '628' }, key)],
+    ['send-template', (c, key) => c.messages.sendTemplate('s', { chatId: 'c@c.us', templateName: 'welcome', vars: { name: 'A' } }, key)],
+    ['send-poll', (c, key) => c.messages.sendPoll('s', { chatId: 'c@c.us', name: 'Question', options: ['A', 'B'] }, key)],
+    ['reply', (c, key) => c.messages.reply('s', { chatId: 'c@c.us', quotedMessageId: 'q', text: 'reply' }, key)],
+    ['forward', (c, key) => c.messages.forward('s', { fromChatId: 'a@c.us', toChatId: 'b@c.us', messageId: 'm' }, key)],
+  ];
+
+  it.each(sends)('%s keeps keys local to each call and preserves JSON', async (route, send) => {
+    const t = new MockTransport().on('POST', new RegExp(`/messages/${route}$`), { body: { messageId: 'm', timestamp: 1 } });
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+    await send(c);
+    const originalBody = t.lastCall!.body;
+    expect(t.lastCall!.headers['idempotency-key']).toBeUndefined();
+
+    for (const key of ['first-key', 'second-key']) {
+      await send(c, key);
+      expect(t.lastCall!.method).toBe('POST');
+      expect(t.lastCall!.url).toBe(`http://localhost/api/sessions/s/messages/${route}`);
+      expect(t.lastCall!.headers['idempotency-key']).toBe(key);
+      expect(t.lastCall!.body).toEqual(originalBody);
+    }
+
+    await send(c);
+    expect(t.lastCall!.headers['idempotency-key']).toBeUndefined();
+    expect(t.lastCall!.body).toEqual(originalBody);
+  });
+
+  it('treats a null key from an untyped caller as no key, as the Python and PHP SDKs do', async () => {
+    const t = new MockTransport().on('POST', /\/messages\/send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+    await c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi' }, null as unknown as string);
+    expect(t.lastCall!.headers['idempotency-key']).toBeUndefined();
+  });
+
+  it('overrides a mixed-case default without changing later calls', async () => {
+    const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+    const headers = { 'iDeMpOtEnCy-KeY': 'default-key', 'X-Trace': 'trace' };
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', defaultHeaders: headers, fetch: t.asFetch() });
+    const body = { chatId: 'c@c.us', text: 'hi' };
+    await c.messages.sendText('s', body, 'explicit-key');
+    expect(t.lastCall!.headers['idempotency-key']).toBe('explicit-key');
+    expect(t.lastCall!.headers['x-trace']).toBe('trace');
+    expect(headers['iDeMpOtEnCy-KeY']).toBe('default-key');
+    await c.messages.sendText('s', body);
+    expect(t.lastCall!.headers['idempotency-key']).toBe('default-key');
+  });
+
+  it.each(['', 'has space', ' key', 'key ', 'key\n', 'key\t', 'caf\u00e9', 'a\u007fb', 'x'.repeat(256)])(
+    'rejects invalid key %j before transport',
+    async key => {
+      const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+      const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+      await expect(c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi' }, key)).rejects.toThrow(TypeError);
+      expect(t.calls).toHaveLength(0);
+    },
+  );
+
+  it.each(['!', '~', 'x', 'x'.repeat(255)])('accepts visible ASCII key %j', async key => {
+    const t = new MockTransport().on('POST', /send-text$/, { body: { messageId: 'm', timestamp: 1 } });
+    const c = new OpenWAClient({ baseUrl: 'http://localhost', apiKey: 'k', fetch: t.asFetch() });
+    await c.messages.sendText('s', { chatId: 'c@c.us', text: 'hi' }, key);
+    expect(t.lastCall!.headers['idempotency-key']).toBe(key);
+  });
+});
 
 describe('MessagesResource — exact paths', () => {
   it('sendText posts to /messages/send-text (NOT /messages/text)', async () => {
@@ -84,7 +174,17 @@ describe('MessagesResource — exact paths', () => {
     const t = new MockTransport().on('GET', /\/messages$/, {
       body: {
         messages: [
-          { id: '1', sessionId: 's', chatId: 'a@c.us', from: 'a@c.us', to: 's', type: 'text', direction: 'incoming', status: 'delivered', createdAt: '' },
+          {
+            id: '1',
+            sessionId: 's',
+            chatId: 'a@c.us',
+            from: 'a@c.us',
+            to: 's',
+            type: 'text',
+            direction: 'incoming',
+            status: 'delivered',
+            createdAt: '',
+          },
         ],
         total: 1,
       },
@@ -92,6 +192,52 @@ describe('MessagesResource — exact paths', () => {
     const res = await client(t).messages.list('s', { chatId: 'a@c.us' });
     expect(res.total).toBe(1);
     expect(res.messages).toHaveLength(1);
+  });
+
+  // Asserted on the BODY, not the URL: the field is what this is about, and a URL assertion cannot
+  // see a dropped key. One case per request type, because each is a separate declaration — a type
+  // that forgot the field would still send it from JS but would not compile for a typed caller.
+  it.each([
+    [
+      'send-text',
+      (c: OpenWAClient) => c.messages.sendText('s1', { chatId: 'a@c.us', text: 'hi', quotedMessageId: 'q1' }),
+    ],
+    [
+      'send-image',
+      (c: OpenWAClient) => c.messages.sendImage('s1', { chatId: 'a@c.us', url: 'http://u', quotedMessageId: 'q1' }),
+    ],
+    [
+      'send-location',
+      (c: OpenWAClient) =>
+        c.messages.sendLocation('s1', { chatId: 'a@c.us', latitude: 1, longitude: 2, quotedMessageId: 'q1' }),
+    ],
+    [
+      'send-contact',
+      (c: OpenWAClient) =>
+        c.messages.sendContact('s1', {
+          chatId: 'a@c.us',
+          contactName: 'A',
+          contactNumber: '628',
+          quotedMessageId: 'q1',
+        }),
+    ],
+    [
+      'send-poll',
+      (c: OpenWAClient) =>
+        c.messages.sendPoll('s1', { chatId: 'a@c.us', name: 'Q', options: ['a', 'b'], quotedMessageId: 'q1' }),
+    ],
+  ])('%s forwards quotedMessageId in the body', async (route, call) => {
+    const t = new MockTransport().on('POST', new RegExp(`${route}$`), { body: { messageId: 'm', timestamp: 1 } });
+    await call(client(t));
+    expect(t.lastCall!.body).toMatchObject({ quotedMessageId: 'q1' });
+  });
+
+  // Known-negative control: an ordinary send must not carry the key at all, so an implementation
+  // that always emitted it (as `undefined`, which JSON.stringify drops but a proxy may not) fails.
+  it('omits quotedMessageId entirely on an ordinary send', async () => {
+    const t = new MockTransport().on('POST', /send-image$/, { body: { messageId: 'm', timestamp: 1 } });
+    await client(t).messages.sendImage('s1', { chatId: 'a@c.us', url: 'http://u' });
+    expect(t.lastCall!.body).not.toHaveProperty('quotedMessageId');
   });
 
   it('reply / forward / react / delete', async () => {
@@ -109,6 +255,26 @@ describe('MessagesResource — exact paths', () => {
     expect(t.lastCall!.url).toContain('/messages/react');
     await c.messages.delete('s', { chatId: 'a@c.us', messageId: 'm' });
     expect(t.lastCall!.url).toContain('/messages/delete');
+  });
+
+  it('clickButton posts to /messages/click-button', async () => {
+    const t = new MockTransport().on('POST', /\/messages\/click-button$/, {
+      body: { messageId: 'm2', timestamp: 9 },
+    });
+    const res = await client(t).messages.clickButton('s', {
+      chatId: 'a@c.us',
+      messageId: 'prompt1',
+      buttonId: 'yes',
+      text: 'Sim',
+    });
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/messages/click-button');
+    expect(t.lastCall!.body).toEqual({
+      chatId: 'a@c.us',
+      messageId: 'prompt1',
+      buttonId: 'yes',
+      text: 'Sim',
+    });
+    expect(res.messageId).toBe('m2');
   });
 
   it('editMessage posts to /messages/edit and returns the MessageResponse shape', async () => {
@@ -149,7 +315,11 @@ describe('MessagesResource — exact paths', () => {
         },
       })
       .on('POST', /\/batch\/b\/cancel$/, {
-        body: { batchId: 'b', status: 'cancelled', progress: { total: 1, sent: 0, failed: 0, pending: 0, cancelled: 1 } },
+        body: {
+          batchId: 'b',
+          status: 'cancelled',
+          progress: { total: 1, sent: 0, failed: 0, pending: 0, cancelled: 1 },
+        },
       });
     const c = client(t);
     await c.messages.sendBulk('s', { messages: [{ chatId: 'a@c.us', type: 'text', content: { text: 'x' } }] });
@@ -158,6 +328,8 @@ describe('MessagesResource — exact paths', () => {
     expect(status.progress?.sent).toBe(1);
     expect(t.lastCall!.url).toContain('/messages/batch/b');
     const cancelled = await c.messages.cancelBatch('s', 'b');
+    // The cancel route answers without the per-recipient `results` the status route carries.
+    expectTypeOf(cancelled).toEqualTypeOf<BatchCancelResponse>();
     expect(cancelled.status).toBe('cancelled');
     expect(t.lastCall!.url).toContain('/messages/batch/b/cancel');
     expect(t.lastCall!.method).toBe('POST');
