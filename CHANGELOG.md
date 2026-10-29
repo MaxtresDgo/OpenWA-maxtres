@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `match=contains` to `GET /api/search`, which needs `SEARCH_CONTAINS_ENABLED=true`: case- and accent-insensitive substring search on a trigram index (FTS5 on SQLite, `pg_trgm` and `unaccent` on PostgreSQL) that ranks the 1,000 most recently stored matches, so `total` is at most 1,000 in this mode; `match=word` stays the default and the SDKs accept `match` (#1899). Thanks @luisffm.
 - Add the `MessageSearch` MCP tool, which runs the global message search for agents, with `match=contains` by default only when `SEARCH_CONTAINS_ENABLED=true` (#1899). Thanks @luisffm.
 - Add `PUT /api/sessions/{sessionId}/groups/{groupId}/member-label` to set this account's member label in a group on Baileys; whatsapp-web.js answers `501` (#1918). Thanks @xwork1 for the report.
+- Add a warning log and a `phone_second_lid_reported` audit row, filed under the reporting session, when a session reports a privacy id the gateway did not hold, or held only outside its mapping cache, for a phone number the lid table already maps to another reported id.
 
 ### Changed
 

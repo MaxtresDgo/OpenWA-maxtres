@@ -78,6 +78,7 @@
                 "session_restricted",
                 "session_restriction_lifted",
                 "session_rebind_rejected",
+                "phone_second_lid_reported",
                 "message_sent",
                 "message_failed",
                 "send_pacing_blocked",
