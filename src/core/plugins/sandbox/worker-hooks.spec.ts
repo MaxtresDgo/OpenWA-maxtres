@@ -27,6 +27,33 @@ describe('WorkerHookRegistry', () => {
     expect(sent.filter(m => m.kind === 'hook-subscribe')).toHaveLength(1);
   });
 
+  it('re-subscribes when a later handler lowers the event priority, and only then', () => {
+    const { sent, post } = collect();
+    const reg = new WorkerHookRegistry(post);
+
+    reg.register('message:sending', () => Promise.resolve({ continue: true }), 200);
+    reg.register('message:sending', () => Promise.resolve({ continue: true }), 1);
+    reg.register('message:sending', () => Promise.resolve({ continue: true }), 300);
+
+    expect(sent.filter(m => m.kind === 'hook-subscribe')).toEqual([
+      { kind: 'hook-subscribe', event: 'message:sending', priority: 200 },
+      { kind: 'hook-subscribe', event: 'message:sending', priority: 1 },
+    ]);
+  });
+
+  it('compares a later priority against the default when the first one is not a finite number', () => {
+    const { sent, post } = collect();
+    const reg = new WorkerHookRegistry(post);
+
+    reg.register('message:sending', () => Promise.resolve({ continue: true }), 'abc');
+    reg.register('message:sending', () => Promise.resolve({ continue: true }), 1);
+
+    expect(sent.filter(m => m.kind === 'hook-subscribe')).toEqual([
+      { kind: 'hook-subscribe', event: 'message:sending', priority: 100 },
+      { kind: 'hook-subscribe', event: 'message:sending', priority: 1 },
+    ]);
+  });
+
   it('runs the handler on a hook and replies with continue + modified data', async () => {
     const { sent, post } = collect();
     const reg = new WorkerHookRegistry(post);
@@ -51,6 +78,22 @@ describe('WorkerHookRegistry', () => {
     expect(sent.find(m => m.kind === 'hook-result')).toMatchObject({ continue: false, data: { n: 2 } });
   });
 
+  it('skips a later handler result the event cannot use, keeping an earlier rewrite', async () => {
+    const { sent, post } = collect();
+    const reg = new WorkerHookRegistry(post);
+    reg.register(
+      'message:received',
+      ctx => Promise.resolve({ continue: true, data: { ...(ctx.data as object), body: '[redacted]' } }),
+      10,
+    );
+    reg.register('message:received', () => Promise.resolve({ continue: true, data: null }), 100);
+
+    const message = { id: 'm1', chatId: 'c@c.us', body: 'secret' };
+    await reg.handleHook({ kind: 'hook', id: 5, event: 'message:received', data: message, source: 'Engine' });
+
+    expect(sent.find(m => m.kind === 'hook-result')).toMatchObject({ data: { ...message, body: '[redacted]' } });
+  });
+
   it('a throwing handler does not break the chain', async () => {
     const { sent, post } = collect();
     const reg = new WorkerHookRegistry(post);
@@ -59,6 +102,56 @@ describe('WorkerHookRegistry', () => {
     await reg.handleHook({ kind: 'hook', id: 1, event: 'e', data: { x: 1 }, source: 's' });
 
     expect(sent.find(m => m.kind === 'hook-result')).toMatchObject({ continue: true });
+  });
+
+  it('discards data a handler returns with an error and reports the first failure', async () => {
+    const { sent, post } = collect();
+    const reg = new WorkerHookRegistry(post);
+    const message = { id: 'm1', chatId: 'c@c.us', body: 'secret' };
+    let seen: unknown;
+    reg.register('message:received', () => ({ continue: true, data: { ...message, body: '[redacted]' } }), 10);
+    reg.register('message:received', () => ({ continue: true, data: message, error: new Error('first failure') }), 20);
+    reg.register('message:received', () => Promise.reject(new Error('second failure')), 30);
+    reg.register(
+      'message:received',
+      ({ data }) => {
+        seen = data;
+        return { continue: true };
+      },
+      40,
+    );
+
+    await reg.handleHook({ kind: 'hook', id: 1, event: 'message:received', data: message, source: 'Engine' });
+
+    expect(seen).toEqual({ ...message, body: '[redacted]' });
+    expect(sent.find(m => m.kind === 'hook-result')).toMatchObject({
+      continue: true,
+      data: { ...message, body: '[redacted]' },
+      error: 'first failure',
+    });
+  });
+
+  it('keeps a veto that comes with an error but does not apply its data', async () => {
+    const { sent, post } = collect();
+    const reg = new WorkerHookRegistry(post);
+    const message = { id: 'm1', chatId: 'c@c.us', body: 'secret' };
+    let laterRan = false;
+    reg.register('message:received', () => ({ continue: true, data: { ...message, body: '[redacted]' } }), 10);
+    reg.register('message:received', () => ({ continue: false, data: message, error: new Error('failed') }), 20);
+    reg.register('message:received', () => {
+      laterRan = true;
+      return { continue: true };
+    });
+
+    await reg.handleHook({ kind: 'hook', id: 1, event: 'message:received', data: message, source: 'Engine' });
+
+    expect(laterRan).toBe(false);
+    expect(sent.find(m => m.kind === 'hook-result')).toEqual({
+      kind: 'hook-result',
+      id: 1,
+      continue: false,
+      data: { ...message, body: '[redacted]' },
+    });
   });
 
   it('reports a throwing handler to the host on the hook-result (later handlers still run)', async () => {
@@ -71,6 +164,26 @@ describe('WorkerHookRegistry', () => {
 
     // The error rides the result so the host can surface it; the chain's fail-open shape is unchanged.
     expect(sent.find(m => m.kind === 'hook-result')).toMatchObject({ continue: true, data: { n: 2 }, error: 'boom' });
+  });
+
+  it('reports an uncloneable handler result as an error instead of rejecting the dispatch', async () => {
+    // parentPort.postMessage structured-clones the result; a rejection here would be unhandled in the
+    // worker (the bootstrap calls handleHook with void) and kill it.
+    const sent: WorkerToHostMessage[] = [];
+    const post = (m: WorkerToHostMessage): void => {
+      sent.push(structuredClone(m));
+    };
+    const reg = new WorkerHookRegistry(post);
+    reg.register('e', ({ data }) => Promise.resolve({ continue: true, data: { ...(data as object), fn: () => 1 } }));
+
+    await expect(
+      reg.handleHook({ kind: 'hook', id: 1, event: 'e', data: { x: 1 }, source: 's' }),
+    ).resolves.toBeUndefined();
+
+    const result = sent.find(m => m.kind === 'hook-result') as Extract<WorkerToHostMessage, { kind: 'hook-result' }>;
+    expect(result).toMatchObject({ id: 1, continue: true });
+    expect(result.error).toContain('could not be sent');
+    expect(result).not.toHaveProperty('data'); // the host keeps the original data
   });
 
   it('reports only the FIRST handler error and stringifies non-Error throws', async () => {

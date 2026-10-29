@@ -8,7 +8,7 @@ import { API_BASE_URL } from '../services/api';
 import './Login.css';
 
 interface LoginProps {
-  onLogin: (apiKey: string) => void;
+  onLogin: (apiKey: string, role?: string, engineType?: string, scoped?: boolean) => void;
 }
 
 export function Login({ onLogin }: LoginProps) {
@@ -25,7 +25,9 @@ export function Login({ onLogin }: LoginProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!apiKey.trim()) {
+    // The stored key is matched against key prefixes elsewhere, so a pasted space must not reach it.
+    const key = apiKey.trim();
+    if (!key) {
       setError(t('login.apiKeyRequired'));
       return;
     }
@@ -37,15 +39,26 @@ export function Login({ onLogin }: LoginProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': apiKey,
+          'X-API-Key': key,
         },
       });
 
       if (response.ok) {
-        onLogin(apiKey);
+        // The validate body already carries the key's role — hand it up so the app can set it
+        // directly instead of re-validating the same key a second time.
+        const data: { role?: string; engineType?: string; scoped?: unknown } = await response.json().catch(() => ({}));
+        onLogin(
+          key,
+          data.role,
+          typeof data.engineType === 'string' ? data.engineType : undefined,
+          data.scoped === true,
+        );
       } else {
-        const errorData = await response.json().catch(() => ({}));
-        setError(errorData.message || t('login.invalidKey'));
+        // A 5xx, or a body that is not the gateway's JSON (a proxy error page while it restarts), says
+        // nothing about the key; a refusal keeps the gateway's reason (expired, revoked, rate limited).
+        const errorData: { message?: unknown } = await response.json().catch(() => ({}));
+        const reason = response.status < 500 && typeof errorData.message === 'string' ? errorData.message : '';
+        setError(reason || t(response.status === 401 ? 'login.invalidKey' : 'login.connectionError'));
       }
     } catch {
       setError(t('login.connectionError'));
@@ -90,6 +103,8 @@ export function Login({ onLogin }: LoginProps) {
                 onChange={e => setApiKey(e.target.value)}
                 placeholder={t('login.apiKeyPlaceholder')}
                 className={error ? 'error' : ''}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? 'apiKey-error' : undefined}
               />
               <button
                 type="button"
@@ -100,7 +115,11 @@ export function Login({ onLogin }: LoginProps) {
                 {showKey ? <EyeOff size={20} /> : <Eye size={20} />}
               </button>
             </div>
-            {error && <span className="error-message">{error}</span>}
+            {error && (
+              <span id="apiKey-error" className="error-message" role="alert">
+                {error}
+              </span>
+            )}
           </div>
 
           <button type="submit" className="connect-btn" disabled={isLoading}>

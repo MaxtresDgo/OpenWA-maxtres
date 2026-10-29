@@ -10,7 +10,7 @@ func (s *ChannelsService) base(sessionID string) string {
 	return "/api/sessions/" + pathEscape(sessionID) + "/channels"
 }
 
-// List returns channels for a session.
+// List returns channels for a session. whatsapp-web.js only; Baileys answers 501.
 func (s *ChannelsService) List(ctx context.Context, sessionID string) ([]ChannelRecord, error) {
 	var out []ChannelRecord
 	err := s.client.do(ctx, "GET", s.base(sessionID), nil, nil, &out)
@@ -27,7 +27,7 @@ func (s *ChannelsService) Get(ctx context.Context, sessionID, channelID string) 
 	return &out, nil
 }
 
-// Messages returns recent messages from a channel.
+// Messages returns recent messages from a channel. whatsapp-web.js only; Baileys answers 501.
 func (s *ChannelsService) Messages(ctx context.Context, sessionID, channelID string, query *ChannelMessageQuery) ([]ChannelMessageRecord, error) {
 	var out []ChannelMessageRecord
 	err := s.client.do(ctx, "GET", s.base(sessionID)+"/"+pathEscape(channelID)+"/messages", valuesOf(query), nil, &out)
@@ -38,7 +38,10 @@ func (s *ChannelsService) Messages(ctx context.Context, sessionID, channelID str
 func (s *ChannelsService) Create(ctx context.Context, sessionID string, body CreateChannelRequest) (*ChannelRecord, error) {
 	var out ChannelRecord
 	err := s.client.do(ctx, "POST", s.base(sessionID), nil, body, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Delete destroys a channel this account owns. Irreversible, and every subscriber loses it.
@@ -48,17 +51,24 @@ func (s *ChannelsService) Create(ctx context.Context, sessionID string, body Cre
 func (s *ChannelsService) Delete(ctx context.Context, sessionID, channelID string) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/delete", nil, nil, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Mute mutes or unmutes a channel's notifications. The subscription is untouched either way.
 func (s *ChannelsService) Mute(ctx context.Context, sessionID, channelID string, body MuteChannelRequest) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/mute", nil, body, &out)
-	return &out, err
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Subscribe subscribes to a channel by invite code. Requires an OPERATOR-level key.
+// Baileys only; whatsapp-web.js answers 501.
 func (s *ChannelsService) Subscribe(ctx context.Context, sessionID string, body SubscribeChannelRequest) (*ChannelRecord, error) {
 	var out ChannelRecord
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/subscribe", nil, body, &out)
@@ -72,6 +82,36 @@ func (s *ChannelsService) Subscribe(ctx context.Context, sessionID string, body 
 func (s *ChannelsService) Unsubscribe(ctx context.Context, sessionID, channelID string) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "DELETE", s.base(sessionID)+"/"+pathEscape(channelID), nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DemoteAdmin demotes a channel admin back to a subscriber. Requires an OPERATOR-level key.
+//
+// There is no promote counterpart: neither engine library has one, so an admin is promoted from the
+// WhatsApp app and demoted here. The whatsapp-web.js engine answers 501.
+func (s *ChannelsService) DemoteAdmin(
+	ctx context.Context, sessionID, channelID string, body DemoteChannelAdminRequest,
+) (*SuccessResult, error) {
+	var out SuccessResult
+	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/admins/demote", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// TransferOwnership hands a channel to a new owner. Requires an OPERATOR-level key.
+//
+// Irreversible: once the transfer lands this account stops being the owner and cannot take the
+// channel back. The whatsapp-web.js engine answers 501.
+func (s *ChannelsService) TransferOwnership(
+	ctx context.Context, sessionID, channelID string, body TransferChannelOwnershipRequest,
+) (*SuccessResult, error) {
+	var out SuccessResult
+	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(channelID)+"/owner/transfer", nil, body, &out)
 	if err != nil {
 		return nil, err
 	}

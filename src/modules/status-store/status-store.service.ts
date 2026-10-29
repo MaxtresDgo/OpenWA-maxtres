@@ -7,16 +7,26 @@ import { StatusUpdate } from './entities/status-update.entity';
 import type { IncomingStatus } from './incoming-status';
 import type { Status } from '../../engine/interfaces/whatsapp-engine.interface';
 import { StorageService } from '../../common/storage/storage.service';
-import { isUniqueConstraintError } from '../../common/utils/unique-constraint.util';
+import { sweepOrphanedFiles } from '../../common/storage/orphan-sweep';
+import { startGuardedInterval } from '../../common/utils/guarded-interval';
+import { extFromMimetype } from '../../common/media/mime-ext';
+import { isUniqueViolation } from '../../common/utils/db-errors';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
-import { userPart } from '../../engine/identity/wa-id';
+import { parseWaId, userPart } from '../../engine/identity/wa-id';
 import { createLogger } from '../../common/services/logger.service';
+import { captureSessionWrites, SessionWriteScope } from '../../common/utils/session-write-scope';
 
 /** A status/story lives for 24h from posting, matching WhatsApp's own expiry. Exported for the
  * session service's seed, which skips backfilling statuses that have already run out their TTL. */
 export const STATUS_TTL_MS = 24 * 60 * 60 * 1000;
 /** How often the TTL purge sweeps expired rows. */
 const PURGE_INTERVAL_MS = 15 * 60 * 1000;
+/** Rows removed per purge statement. Keeps the id list far below the drivers' bind-parameter
+ *  ceilings (SQLite 32766, Postgres 65535) and bounds how much work one failure can undo. */
+const PURGE_BATCH_SIZE = 500;
+/** Cap on batches per run, so one tick cannot monopolise the process draining a huge backlog;
+ *  whatever is left is picked up by the next scheduled run. */
+const PURGE_MAX_BATCHES_PER_RUN = 200;
 /** Default per-file cap on persisted status media. Exported for the session service's seed, which
  * pre-gates history downloads at the same cap so over-cap blobs are never fetched. */
 export const DEFAULT_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
@@ -30,16 +40,6 @@ const DEFAULT_ORPHAN_GRACE_MS = 60 * 60 * 1000;
 /** Storage key prefix owned by the status store; the media bucket is shared with chat media. */
 const STATUS_MEDIA_PREFIX = 'statuses/';
 
-/** Subtypes whose registered mimetype name differs from the conventional file extension. */
-const MIME_SUBTYPE_EXT_OVERRIDES: Record<string, string> = { jpeg: 'jpg', quicktime: 'mov' };
-
-/** File extension to store a status media blob under, derived from its mimetype; 'bin' when unrecognized. */
-function extFromMimetype(mimetype: string): string {
-  const subtype = mimetype.split('/')[1]?.split(';')[0]?.trim().toLowerCase();
-  if (!subtype || !/^[a-z0-9]+$/.test(subtype)) return 'bin';
-  return MIME_SUBTYPE_EXT_OVERRIDES[subtype] ?? subtype;
-}
-
 /**
  * Persists inbound status/story broadcasts (`StatusUpdate` rows) with a 24h TTL, storing any attached
  * media through `StorageService`. Runs two recurring sweeps: the TTL purge (once at startup, then
@@ -49,10 +49,12 @@ function extFromMimetype(mimetype: string): string {
 @Injectable()
 export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = createLogger('StatusStoreService');
-  private purgeTimer?: ReturnType<typeof setInterval>;
-  private orphanSweepTimer?: ReturnType<typeof setInterval>;
+  /** Stops the TTL purge and the orphan sweep; set while the service is running. */
+  private stopMaintenance: Array<() => void> = [];
   /** First sweep sighting (epoch ms) of each unreferenced status media file, for the grace window. */
   private readonly orphanFirstSeenAt = new Map<string, number>();
+  /** Last row id the TTL purge walked past; the next run resumes after it. */
+  private purgeCursor?: string;
 
   constructor(
     @InjectRepository(StatusUpdate, 'data')
@@ -65,85 +67,95 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
-    const runPurge = (): void => {
-      this.purgeExpired(Date.now()).catch(err =>
-        this.logger.error('Status purge failed', err instanceof Error ? err.stack : String(err)),
-      );
-    };
-    runPurge(); // sweep once at startup
-    this.purgeTimer = setInterval(runPurge, PURGE_INTERVAL_MS);
-    this.purgeTimer.unref?.();
-
-    const runOrphanSweep = (): void => {
-      this.sweepOrphanedMedia(Date.now()).catch(err =>
-        this.logger.error('Status media orphan sweep failed', err instanceof Error ? err.stack : String(err)),
-      );
-    };
-    runOrphanSweep(); // the first pass only records first-seen; nothing is deleted before the grace window
+    const failed = (what: string) => (err: unknown) =>
+      this.logger.error(`${what} failed`, err instanceof Error ? err.stack : String(err));
     const sweepIntervalMs = this.configService.get<number>(
       'status.orphanSweepIntervalMs',
       DEFAULT_ORPHAN_SWEEP_INTERVAL_MS,
     );
-    this.orphanSweepTimer = setInterval(runOrphanSweep, sweepIntervalMs);
-    this.orphanSweepTimer.unref?.();
+    this.stopMaintenance = [
+      // Once at startup, then on a timer; a pass that outlasts its interval is not stacked on.
+      startGuardedInterval(() => this.purgeExpired(Date.now()), PURGE_INTERVAL_MS, failed('Status purge')),
+      // The first pass only records first-seen; nothing is deleted before the grace window.
+      startGuardedInterval(
+        () => this.sweepOrphanedMedia(Date.now()),
+        sweepIntervalMs,
+        failed('Status media orphan sweep'),
+      ),
+    ];
   }
 
   onModuleDestroy(): void {
-    if (this.purgeTimer) clearInterval(this.purgeTimer);
-    if (this.orphanSweepTimer) clearInterval(this.orphanSweepTimer);
+    for (const stop of this.stopMaintenance) stop();
+    this.stopMaintenance = [];
   }
 
   /**
    * Insert a status row (idempotent on `(sessionId, waStatusId)`), persisting any attached media.
-   * `created` tells the caller whether this call actually inserted the row — false for a duplicate
-   * delivery or a lost insert race — so a once-per-status side effect (the status.received webhook)
-   * doesn't fire again for a status consumers already saw.
+   * `created` tells the caller whether this call actually inserted the row: false for a duplicate
+   * delivery, a lost insert race, or a row removed while its media was written, so a once-per-status
+   * side effect (the status.received webhook) doesn't fire again for a status consumers already saw.
    *
    * Row-first ordering: the row is saved BEFORE its media file is written. A crash mid-ingest then
    * leaves a consistent media-omitted row behind (the worst case is a missing attachment), never a
    * permanent orphan file; the narrow window between the file write and the row update is the only
    * remaining orphan source, and the reconciliation sweep reaps those.
    */
-  async ingest(sessionId: string, s: IncomingStatus): Promise<{ row: StatusUpdate; created: boolean }> {
-    const existing = await this.repository.findOne({ where: { sessionId, waStatusId: s.waStatusId } });
-    if (existing) return { row: existing, created: false };
-
-    const row = new StatusUpdate();
-    row.sessionId = sessionId;
-    row.contactJid = s.contactJid;
-    row.contactName = s.contactName;
-    row.contactPushName = s.contactPushName;
-    row.waStatusId = s.waStatusId;
-    row.type = s.type;
-    row.caption = s.caption;
-    row.backgroundColor = s.backgroundColor;
-    row.font = s.font;
-    row.postedAt = s.postedAt;
-    row.expiresAt = s.postedAt + STATUS_TTL_MS;
-    // Settles every media outcome that does NOT need a file write; a keepable blob stays
-    // omitted-for-now until attachMedia lands the file and flips it (post-save).
-    const keepMedia = this.applyMediaDecision(row, s);
-
-    let saved: StatusUpdate;
+  async ingest(
+    sessionId: string,
+    s: IncomingStatus,
+    lifetime?: SessionWriteScope,
+  ): Promise<{ row: StatusUpdate; created: boolean }> {
+    const scope = lifetime ?? this.captureWrites(sessionId);
     try {
-      saved = await this.repository.save(row);
-    } catch (error) {
-      // The unique (sessionId, waStatusId) index is the idempotency backstop for a concurrent ingest
-      // of the same status racing past the findOne check above; on a unique-constraint violation the
-      // loser re-reads and returns the row the winner just inserted instead of surfacing the
-      // constraint error to the caller. Any OTHER save error is a genuine persistence failure and
-      // must propagate — never be masked by a coincidentally matching row. No media file has been
-      // written at this point (row-first ordering), so unlike a file-first ingest there is nothing
-      // to reap here — the winner's own call owns its file write.
-      const winner = await this.repository.findOne({ where: { sessionId, waStatusId: s.waStatusId } });
-      if (winner && isUniqueConstraintError(error)) return { row: winner, created: false };
-      throw error;
-    }
+      const existing = await this.repository.findOne({ where: { sessionId, waStatusId: s.waStatusId } });
+      if (existing) return { row: existing, created: false };
 
-    if (keepMedia) {
-      await this.attachMedia(saved, sessionId, s);
+      const row = new StatusUpdate();
+      row.sessionId = sessionId;
+      row.contactJid = s.contactJid;
+      row.contactName = s.contactName;
+      row.contactPushName = s.contactPushName;
+      row.waStatusId = s.waStatusId;
+      row.type = s.type;
+      row.caption = s.caption;
+      row.backgroundColor = s.backgroundColor;
+      row.font = s.font;
+      row.postedAt = s.postedAt;
+      row.expiresAt = s.postedAt + STATUS_TTL_MS;
+      // Settles every media outcome that does NOT need a file write; a keepable blob stays
+      // omitted-for-now until attachMedia lands the file and flips it (post-save).
+      const keepMedia = this.applyMediaDecision(row, s);
+
+      let saved: StatusUpdate;
+      try {
+        // Without a transaction: a single-row save() wraps itself in one, and on SQLite's single shared
+        // connection the rollback of the unique violation expected below also discards the rows other callers
+        // wrote while it was open, after they were reported stored.
+        saved = await scope.write(() => this.repository.save(row, { transaction: false }));
+      } catch (error) {
+        // The unique (sessionId, waStatusId) index is the idempotency backstop for a concurrent ingest
+        // of the same status racing past the findOne check above; on a unique-constraint violation the
+        // loser re-reads and returns the row the winner just inserted instead of surfacing the
+        // constraint error to the caller. Any OTHER save error is a genuine persistence failure and
+        // must propagate — never be masked by a coincidentally matching row. No media file has been
+        // written at this point (row-first ordering), so unlike a file-first ingest there is nothing
+        // to reap here — the winner's own call owns its file write.
+        const winner = await this.repository.findOne({ where: { sessionId, waStatusId: s.waStatusId } });
+        if (winner && isUniqueViolation(error)) return { row: winner, created: false };
+        throw error;
+      }
+
+      // A row removed while its media was being written (a purge, a session delete) was never stored.
+      if (keepMedia && !(await this.attachMedia(saved, sessionId, s))) return { row: saved, created: false };
+      return { row: saved, created: true };
+    } finally {
+      if (!lifetime) scope.close();
     }
-    return { row: saved, created: true };
+  }
+
+  captureWrites(sessionId: string): SessionWriteScope {
+    return captureSessionWrites(this.repository.manager?.connection ?? this.repository, sessionId);
   }
 
   /**
@@ -180,11 +192,12 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
    * Write the media file for a row already saved in the omitted-for-now state, then point the row at
    * it. A failed write is recorded as omitReason 'write_failed' rather than thrown — a storage
    * hiccup must not lose the status itself. A failure of the follow-up row update leaves the file
-   * unreferenced; that is the reconciliation sweep's job, so it is logged and swallowed here.
+   * unreferenced; that is the reconciliation sweep's job, so it is logged and swallowed here. Returns
+   * false when the row no longer exists: the file is removed and nothing was published.
    */
-  private async attachMedia(row: StatusUpdate, sessionId: string, s: IncomingStatus): Promise<void> {
+  private async attachMedia(row: StatusUpdate, sessionId: string, s: IncomingStatus): Promise<boolean> {
     const media = s.media;
-    if (!media?.data) return;
+    if (!media?.data) return true;
 
     const key = `${STATUS_MEDIA_PREFIX}${sessionId}/${randomUUID()}.${extFromMimetype(media.mimetype)}`;
     try {
@@ -195,19 +208,33 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
         error instanceof Error ? error.stack : String(error),
       );
       row.omitReason = 'write_failed';
-      await this.repository.save(row).catch(err =>
+      await this.repository.update({ id: row.id, sessionId }, { omitReason: row.omitReason }).catch(err =>
         this.logger.warn(`Failed to record the write_failed omission for status ${s.waStatusId}`, {
           error: String(err),
         }),
       );
-      return;
+      return true;
     }
 
     row.mediaPath = key;
     row.mediaMimetype = media.mimetype;
     row.mediaOmitted = false;
     try {
-      await this.repository.save(row);
+      const result = await this.repository.update(
+        { id: row.id, sessionId },
+        {
+          mediaPath: row.mediaPath,
+          mediaMimetype: row.mediaMimetype,
+          mediaOmitted: false,
+        },
+      );
+      if (result.affected === 0) {
+        row.mediaPath = undefined;
+        row.mediaMimetype = undefined;
+        row.mediaOmitted = true;
+        await this.storageService.deleteFile(key).catch(() => undefined); // else the orphan sweep reaps it
+        return false;
+      }
     } catch (error) {
       // The file exists but the row cannot reference it — an orphan the reconciliation sweep reaps
       // after its grace window. The persisted row stays consistent (still omitted from the first
@@ -224,6 +251,7 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
       // omission — the media really is gone (nothing retries), so say so.
       row.omitReason = 'write_failed';
     }
+    return true;
   }
 
   // Reads exclude already-expired rows: WhatsApp hides a status the moment its 24h are up, but the
@@ -242,13 +270,20 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
     // mid-window) — match every candidate so a resolved-form query doesn't silently miss lid rows.
     const candidates = new Set<string>([contactJid]);
     if (this.lidMappingStore) {
-      const phone = userPart(contactJid);
-      candidates.add(`${phone}@c.us`);
-      // Forward-resolve a @lid query to its phone too, or rows ingested after the mapping was
-      // learned (stored under @c.us) are missed by a consumer querying the raw lid.
-      const resolved = this.lidMappingStore.getCached(phone);
-      if (resolved) candidates.add(`${resolved}@c.us`);
-      for (const lid of this.lidMappingStore.lidsForPhone(phone)) candidates.add(`${lid}@lid`);
+      // parseWaId classifies the input, so an upper-case or hosted.lid input is a lid too.
+      const parsed = parseWaId(contactJid);
+      if (parsed.kind === 'lid') {
+        // A lid's digits are not a phone (the map's keys are raw digits, so a phone could collide
+        // with a lid): add the folded `<lid>@lid` form it is stored under and forward-resolve it, so
+        // rows ingested after the mapping was learned (stored under @c.us) still match.
+        candidates.add(`${parsed.userPart}@lid`);
+        const resolved = await this.lidMappingStore.findPhoneForLid(parsed.userPart);
+        if (resolved) candidates.add(`${resolved}@c.us`);
+      } else {
+        const phone = userPart(contactJid);
+        candidates.add(`${phone}@c.us`);
+        for (const lid of await this.lidMappingStore.findLidsForPhone(phone)) candidates.add(`${lid}@lid`);
+      }
     }
     const rows = await this.repository.find({
       where: { sessionId, contactJid: In([...candidates]), expiresAt: MoreThan(Date.now()) },
@@ -266,22 +301,28 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
    */
   private canonicalContactJid(jid: string): string {
     if (!jid.endsWith('@lid')) return jid;
-    const phone = this.lidMappingStore?.getCached(userPart(jid));
+    const phone = this.lidMappingStore?.resolveLid(jid);
     return phone ? `${phone}@c.us` : jid;
   }
 
+  // The nullable columns read back as null, while Status declares these fields optional: `?? undefined`
+  // keeps them off the wire, as the contract (StatusDto, openapi) says.
   private toStatus(row: StatusUpdate): Status {
     return {
       id: row.waStatusId,
-      contact: { id: this.canonicalContactJid(row.contactJid), name: row.contactName, pushName: row.contactPushName },
+      contact: {
+        id: this.canonicalContactJid(row.contactJid),
+        name: row.contactName ?? undefined,
+        pushName: row.contactPushName ?? undefined,
+      },
       type: row.type,
-      caption: row.caption,
+      caption: row.caption ?? undefined,
       mediaUrl:
         row.mediaPath && !row.mediaOmitted
           ? `/api/sessions/${row.sessionId}/status/${row.waStatusId}/media`
           : undefined,
-      backgroundColor: row.backgroundColor,
-      font: row.font,
+      backgroundColor: row.backgroundColor ?? undefined,
+      font: row.font ?? undefined,
       timestamp: new Date(row.postedAt),
       expiresAt: new Date(row.expiresAt),
     };
@@ -291,8 +332,10 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
     const row = await this.repository.findOne({
       where: { sessionId, waStatusId: statusId, expiresAt: MoreThan(Date.now()) },
     });
-    if (!row || row.mediaOmitted || !row.mediaPath || !row.mediaMimetype) return null;
-    return { path: row.mediaPath, mimetype: row.mediaMimetype };
+    // Same condition toStatus() advertises a mediaUrl on. Media stored without a type (an engine that
+    // reported none) is still served, as octet-stream.
+    if (!row || row.mediaOmitted || !row.mediaPath) return null;
+    return { path: row.mediaPath, mimetype: row.mediaMimetype || 'application/octet-stream' };
   }
 
   /**
@@ -301,36 +344,55 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
    * file is only rediscovered by the orphan sweep after its grace window), so the row stays and the
    * next sweep retries the delete. A missing file is a successful delete (see StorageService), so an
    * already-gone file never wedges its row.
+   *
+   * Drained in bounded batches. The 24h TTL does not bound a backlog: a restart after downtime, or
+   * media deletes that keep failing, leave any number of expired rows, and a single
+   * `DELETE ... WHERE id IN (...)` past the driver's bind-parameter ceiling throws after the files are
+   * gone, then fails the same way on every later run. The batches walk the expired rows by id, resuming
+   * across runs, so rows whose delete keeps failing are stepped over instead of blocking newer ones. A
+   * batch in which every delete fails ends the run: that means the store is down, and walking on would
+   * only repeat the failure.
    */
   async purgeExpired(now: number): Promise<number> {
-    const expired = await this.repository.find({ where: { expiresAt: LessThan(now) } });
-    if (expired.length === 0) return 0;
+    let removed = 0;
+    let after = this.purgeCursor;
+    this.purgeCursor = undefined;
+    for (let batch = 0; batch < PURGE_MAX_BATCHES_PER_RUN; batch++) {
+      const expired = await this.repository.find({
+        where: { expiresAt: LessThan(now), ...(after ? { id: MoreThan(after) } : {}) },
+        select: { id: true, mediaPath: true },
+        order: { id: 'ASC' },
+        take: PURGE_BATCH_SIZE,
+      });
+      if (expired.length === 0) break;
+      after = expired[expired.length - 1].id;
 
-    const deletableIds: string[] = [];
-    await Promise.all(
-      expired.map(async row => {
-        if (!row.mediaPath) {
-          deletableIds.push(row.id);
-          return;
-        }
+      const deletableIds: string[] = [];
+      for (const row of expired) {
         try {
-          await this.storageService.deleteFile(row.mediaPath);
+          if (row.mediaPath) await this.storageService.deleteFile(row.mediaPath);
           deletableIds.push(row.id);
         } catch (err) {
           this.logger.warn(
             `Failed to delete expired status media ${row.mediaPath}; keeping the row for the next sweep`,
-            {
-              error: String(err),
-            },
+            { error: String(err) },
           );
         }
-      }),
-    );
+      }
 
-    // Every media delete may have failed — delete([]) throws TypeORM's empty-criteria error.
-    if (deletableIds.length === 0) return 0;
-    const result = await this.repository.delete(deletableIds);
-    return result.affected ?? deletableIds.length;
+      // Rows whose delete failed are kept; they are retried once the walk wraps around.
+      if (deletableIds.length === 0) {
+        this.purgeCursor = after;
+        break;
+      }
+      const result = await this.repository.delete(deletableIds);
+      removed += result.affected ?? deletableIds.length;
+      // A short batch means the backlog is drained and the next run starts over from the lowest id;
+      // a run that hits the batch cap resumes where it stopped.
+      if (expired.length < PURGE_BATCH_SIZE) break;
+      if (batch === PURGE_MAX_BATCHES_PER_RUN - 1) this.purgeCursor = after;
+    }
+    return removed;
   }
 
   /**
@@ -345,42 +407,24 @@ export class StatusStoreService implements OnModuleInit, OnModuleDestroy {
    */
   async sweepOrphanedMedia(now: number = Date.now()): Promise<number> {
     const graceMs = this.configService.get<number>('status.orphanGraceMs', DEFAULT_ORPHAN_GRACE_MS);
-    // Stream via iterateFiles: listFiles() truncates at STORAGE_LIST_MAX_FILES (a per-call DoS
-    // guard, not a completeness contract), which would strand every orphan past the cap. Scope the
-    // walk to the statuses/ prefix so dropping that cap does not pull the whole media store — chat
-    // media shares this bucket — through the iterator and its dedupe set.
-    const files: string[] = [];
-    for await (const file of this.storageService.iterateFiles(STATUS_MEDIA_PREFIX)) {
-      if (file.startsWith(STATUS_MEDIA_PREFIX)) files.push(file);
-    }
-    const rows = await this.repository.find({
-      where: { mediaPath: Not(IsNull()) },
-      select: { mediaPath: true },
+    // The referenced set is bounded by the 24h TTL, so a single whole-set query is the cheap shape
+    // here (no chunking) — unlike the chat-media archive, whose rows can accumulate without bound.
+    const removed = await sweepOrphanedFiles({
+      storage: this.storageService,
+      prefix: STATUS_MEDIA_PREFIX,
+      graceMs,
+      now,
+      firstSeenAt: this.orphanFirstSeenAt,
+      referencedAmong: async () => {
+        const rows = await this.repository.find({
+          where: { mediaPath: Not(IsNull()) },
+          select: { mediaPath: true },
+        });
+        return new Set(rows.map(row => row.mediaPath));
+      },
+      onDeleteFailed: (file, err) =>
+        this.logger.warn(`Failed to delete orphaned status media ${file}`, { error: String(err) }),
     });
-    const referenced = new Set(rows.map(row => row.mediaPath));
-
-    let removed = 0;
-    const present = new Set(files);
-    for (const file of files) {
-      if (referenced.has(file)) {
-        this.orphanFirstSeenAt.delete(file);
-        continue;
-      }
-      const firstSeenAt = this.orphanFirstSeenAt.get(file) ?? now;
-      this.orphanFirstSeenAt.set(file, firstSeenAt);
-      if (now - firstSeenAt < graceMs) continue;
-      try {
-        await this.storageService.deleteFile(file);
-        this.orphanFirstSeenAt.delete(file);
-        removed += 1;
-      } catch (err) {
-        this.logger.warn(`Failed to delete orphaned status media ${file}`, { error: String(err) });
-      }
-    }
-    // Drop bookkeeping for files that are gone so the map can't grow unbounded.
-    for (const key of [...this.orphanFirstSeenAt.keys()]) {
-      if (!present.has(key)) this.orphanFirstSeenAt.delete(key);
-    }
     if (removed > 0) this.logger.log(`Status media orphan sweep removed ${removed} file(s)`);
     return removed;
   }

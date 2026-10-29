@@ -1,15 +1,35 @@
 import type { WAMessage } from '@whiskeysockets/baileys';
 import type { LidMappingStore } from '../identity/lid-mapping-store.service';
+import type { ChatStateStore } from '../adapters/baileys-chat-state-store.service';
 
 /**
  * Persistence boundary for the Baileys engine's message store. The adapter depends on this narrow
  * interface (not the concrete Nest service) so it stays unit-testable with a fake.
  */
 export interface BaileysMessageStore {
-  /** Persist a message (idempotent on the same id) so it can be referenced by reply/forward/react/delete. */
+  /**
+   * Persist a message (idempotent on the same id) so it can be referenced by reply/forward/react/delete.
+   * A read of the id issued any time after this is called waits for the write, so the message is
+   * readable from the moment its write starts.
+   */
   put(sessionId: string, msg: WAMessage): Promise<void>;
   /** Look up a previously-seen message by its id, or null. */
   getMessage(sessionId: string, messageId: string): Promise<WAMessage | null>;
+  /**
+   * Look up many messages in one query. Ids the store has never seen are simply absent from the
+   * result, so the caller cannot assume the order or the length matches its input.
+   */
+  getMessages(sessionId: string, messageIds: string[]): Promise<WAMessage[]>;
+  /**
+   * Rewrite a stored message in place, for an edit or a delete for everyone. `change` returns the
+   * replacement, or null to leave it untouched; an id the store does not hold stays absent.
+   */
+  update(sessionId: string, messageId: string, change: (stored: WAMessage) => WAMessage | null): Promise<void>;
+  /**
+   * Delete a stored message, but only while `shouldRemove` accepts the copy held when the delete runs.
+   * An id the store does not hold stays absent. Queued behind any put() or update() of the same id.
+   */
+  remove(sessionId: string, messageId: string, shouldRemove: (stored: WAMessage) => boolean): Promise<void>;
   /** Remove all stored messages for a session (called on logout). */
   clearSession(sessionId: string): Promise<void>;
 }
@@ -20,17 +40,18 @@ export interface BaileysMessageStore {
  * (the adapter appends the session id to isolate each session).
  */
 export interface BaileysAdapterConfig {
-  /** Session NAME — keys the on-disk auth directory and LID-mapping provenance. */
+  /** Session UUID (Session.id) — keys the on-disk auth directory, chat state and LID provenance. */
   sessionId: string;
   /** Session UUID (Session.id) — keys the FK-bound baileys_stored_messages rows via messageStore. */
   dbSessionId: string;
   authDir: string;
   proxyUrl?: string;
-  proxyType?: 'http' | 'https' | 'socks4' | 'socks5';
   /** Persisted store for reply/forward/react/delete. Provided by the plugin; the four ops require it. */
   messageStore?: BaileysMessageStore;
   /** Persisted, cross-session lid->phone resolution table. Backs lid resolution beyond the in-memory map. */
   lidMappingStore?: LidMappingStore;
+  /** Persisted per-session mute/archive/pin, so those chat fields survive a reconnect Baileys cannot resync. */
+  chatStateStore?: ChatStateStore;
 }
 
 /**

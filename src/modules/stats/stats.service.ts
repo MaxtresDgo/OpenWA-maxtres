@@ -3,8 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { Session, SessionStatus } from '../session/entities/session.entity';
-import { Message, MessageStatus } from '../message/entities/message.entity';
-import { CacheService } from '../../common/cache';
+import { Message, MessageDirection, MessageStatus } from '../message/entities/message.entity';
 
 /**
  * SQL for the time-series timestamp bucket, per DB dialect. SQLite has strftime(); Postgres has
@@ -41,6 +40,18 @@ export function maxCreatedAtSql(dbType: string): string {
     ? `to_char(MAX(m."createdAt"), 'YYYY-MM-DD HH24:MI:SS')`
     : `strftime('%Y-%m-%d %H:%M:%S', MAX(m.createdAt))`;
 }
+
+/**
+ * SQL for a top chat's label. `chatName` holds the SENDER's push name, not the chat's: MAX over a group's
+ * rows named the group after whichever member sorts last. Only a 1:1 chat's inbound rows carry the name
+ * of the chat itself, so groups get null and the dashboard falls back to the chat id.
+ *
+ * The chat id is tested first on purpose: it is in the chatId indexes, so SQLite answers a group's row
+ * without seeking the table row that `direction` and `chatName` live in, which on a table of large rows
+ * is most of the cost (1.7 s down to 0.6 s over 59k messages, most of them in groups).
+ */
+const chatLabelSql = (alias: string): string =>
+  `MAX(CASE WHEN ${alias}.chatId NOT LIKE '%@g.us' AND ${alias}.direction = '${MessageDirection.INCOMING}' THEN ${alias}.chatName END)`;
 
 export interface OverviewStats {
   sessions: {
@@ -85,17 +96,19 @@ export class StatsService {
    * dashboard polling would otherwise re-run them on every request. TTL-only invalidation:
    * entries expire after stats.cacheTtlMs; there is no write-path hook. Session-scoped entries
    * are additionally re-validated on serve (getSessionStats), so a deleted session is not
-   * resurrected from the memo. Key cardinality is
-   * bounded (4 global shapes + one per session), so no size eviction is needed.
+   * resurrected from the memo. Every finished computation also drops the entries that have expired, so
+   * the entries of deleted sessions nobody asks for again do not accumulate. Concurrent misses
+   * on one key share a single computation (`inflight`), so an expired entry costs one scan, not one
+   * per waiting request; a rejection is handed to every waiter and never stored.
    */
   private readonly memo = new Map<string, { expiresAt: number; value: unknown }>();
+  private readonly inflight = new Map<string, Promise<unknown>>();
 
   constructor(
     @InjectRepository(Session, 'data')
     private readonly sessionRepo: Repository<Session>,
     @InjectRepository(Message, 'data')
     private readonly messageRepo: Repository<Message>,
-    private readonly cacheService: CacheService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -109,16 +122,36 @@ export class StatsService {
     return this.configService.get<number>('stats.cacheTtlMs', 30000);
   }
 
-  /** Returns the memoized value for `key` while fresh; otherwise computes, stores, returns it. */
-  private async memoized<T>(key: string, compute: () => Promise<T>): Promise<T> {
+  /**
+   * Returns the memoized value for `key` while fresh; otherwise joins the computation already
+   * running for it, or starts one. The TTL runs from completion, so a scan slower than the TTL does
+   * not store an entry that is already stale. The identity check keeps a flight that was dropped
+   * (getSessionStats on a deleted session) from writing its result back.
+   */
+  private memoized<T>(key: string, compute: () => Promise<T>): Promise<T> {
     const ttl = this.memoTtlMs;
     if (ttl <= 0) return compute();
-    const now = Date.now();
     const hit = this.memo.get(key);
-    if (hit && hit.expiresAt > now) return hit.value as T;
-    const value = await compute();
-    this.memo.set(key, { expiresAt: now + ttl, value });
-    return value;
+    if (hit && hit.expiresAt > Date.now()) return Promise.resolve(hit.value as T);
+    const pending = this.inflight.get(key);
+    if (pending) return pending as Promise<T>;
+    const flight: Promise<T> = compute().then(
+      value => {
+        if (this.inflight.get(key) === flight) {
+          this.inflight.delete(key);
+          const now = Date.now();
+          for (const [memoKey, entry] of this.memo) if (entry.expiresAt <= now) this.memo.delete(memoKey);
+          this.memo.set(key, { expiresAt: now + ttl, value });
+        }
+        return value;
+      },
+      (err: unknown) => {
+        if (this.inflight.get(key) === flight) this.inflight.delete(key);
+        throw err;
+      },
+    );
+    this.inflight.set(key, flight);
+    return flight;
   }
 
   async getOverview(): Promise<OverviewStats> {
@@ -165,13 +198,6 @@ export class StatsService {
       where: { status: MessageStatus.FAILED },
     });
 
-    // Cache session stats
-    await this.cacheService.setSessionsStats({
-      active,
-      total: sessions.length,
-      byStatus,
-    });
-
     return {
       sessions: {
         active,
@@ -206,7 +232,8 @@ export class StatsService {
       .select('m.type', 'type')
       .addSelect('COUNT(*)', 'count')
       .where('m.createdAt >= :since', { since })
-      .andWhere("(m.body IS NOT NULL AND m.body != '') OR m.metadata IS NOT NULL")
+      // Parenthesized: TypeORM does not wrap an andWhere, so a bare OR would escape the period bound.
+      .andWhere("((m.body IS NOT NULL AND m.body != '') OR m.metadata IS NOT NULL)")
       .groupBy('m.type')
       .getRawMany<{ type: string; count: string }>();
 
@@ -245,19 +272,7 @@ export class StatsService {
       ...stats,
     }));
 
-    // Top chats
-    const topChats = await this.messageRepo
-      .createQueryBuilder('m')
-      .select('m.chatId', 'chatId')
-      .addSelect('COUNT(*)', 'messageCount')
-      .addSelect('MAX(m.chatName)', 'chatName')
-      .where('m.createdAt >= :since', { since })
-      .groupBy('m.chatId')
-      // Order by the aggregate expression, not the "messageCount" alias: Postgres folds an unquoted
-      // ORDER BY messageCount to lowercase and 42703s against the quoted alias (SQLite tolerated it).
-      .orderBy('COUNT(*)', 'DESC')
-      .limit(10)
-      .getRawMany<{ chatId: string; messageCount: string; chatName: string | null }>();
+    const topChats = await this.getTopChats(since);
 
     return {
       timeSeries,
@@ -271,6 +286,46 @@ export class StatsService {
     };
   }
 
+  /** The ten chats with the most messages since `since`, each 1:1 chat with its name. */
+  private async getTopChats(
+    since: Date,
+  ): Promise<Array<{ chatId: string; messageCount: string; chatName: string | null }>> {
+    if (this.dataDbType === 'postgres') {
+      return (
+        this.messageRepo
+          .createQueryBuilder('m')
+          .select('m.chatId', 'chatId')
+          .addSelect('COUNT(*)', 'messageCount')
+          .addSelect(chatLabelSql('m'), 'chatName')
+          .where('m.createdAt >= :since', { since })
+          .groupBy('m.chatId')
+          // Order by the aggregate expression, not the "messageCount" alias: Postgres folds an unquoted
+          // ORDER BY messageCount to lowercase and 42703s against the quoted alias.
+          .orderBy('COUNT(*)', 'DESC')
+          .limit(10)
+          .getRawMany<{ chatId: string; messageCount: string; chatName: string | null }>()
+      );
+    }
+    // SQLite keeps no statistics, so for GROUP BY m.chatId it reads the whole table in chatId index order
+    // rather than the createdAt range, however narrow: 3.2 s over 59k messages for a window of 306, and
+    // better-sqlite3 runs it on the event loop, so every request waits. Materializing the window first
+    // makes the createdAt index drive the read (21 ms for the same window). The window is still built by
+    // the query builder, which formats the date parameter the way the column is stored; the TypeORM SQLite
+    // driver cannot emit the MATERIALIZED keyword itself.
+    const [window, params] = this.messageRepo
+      .createQueryBuilder('m')
+      .select('m.chatId', 'chatId')
+      .addSelect('m.chatName', 'chatName')
+      .addSelect('m.direction', 'direction')
+      .where('m.createdAt >= :since', { since })
+      .getQueryAndParameters();
+    return this.messageRepo.manager.query(
+      `WITH w AS MATERIALIZED (${window}) SELECT w.chatId AS "chatId", COUNT(*) AS "messageCount", ` +
+        `${chatLabelSql('w')} AS "chatName" FROM w GROUP BY w.chatId ORDER BY COUNT(*) DESC LIMIT 10`,
+      params,
+    );
+  }
+
   async getSessionStats(sessionId: string): Promise<SessionStats> {
     // The memo has no write-path hook, so a `session:<id>` entry can outlive its session row and
     // would keep serving a deleted session's stats until the TTL expires. Re-check existence on
@@ -279,6 +334,7 @@ export class StatsService {
     const key = `session:${sessionId}`;
     if ((await this.sessionRepo.count({ where: { id: sessionId } })) === 0) {
       this.memo.delete(key);
+      this.inflight.delete(key);
       throw new NotFoundException('Session not found');
     }
     return this.memoized(key, () => this.loadSessionStats(sessionId));
@@ -322,7 +378,7 @@ export class StatsService {
       .select('m.chatId', 'chatId')
       .addSelect('COUNT(*)', 'count')
       .addSelect(maxCreatedAtSql(this.dataDbType), 'lastActive')
-      .addSelect('MAX(m.chatName)', 'chatName')
+      .addSelect(chatLabelSql('m'), 'chatName')
       .where('m.sessionId = :sessionId', { sessionId })
       .groupBy('m.chatId')
       .orderBy('count', 'DESC')

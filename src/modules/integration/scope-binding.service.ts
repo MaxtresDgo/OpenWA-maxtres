@@ -1,11 +1,23 @@
-import { Injectable, NotFoundException, OnApplicationBootstrap } from '@nestjs/common';
+import { isDeepStrictEqual } from 'node:util';
+import { Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { AuditService } from '../audit/audit.service';
 import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
-import { SessionService } from '../session/session.service';
+import { sessionScopeKey } from '../../core/plugins/plugin-activation';
+import { Session } from '../session/entities/session.entity';
 import { PluginInstanceService } from './plugin-instance.service';
 import { PluginInstance } from './entities/plugin-instance.entity';
+import type { PluginConfigField } from '../../core/plugins/plugin.interfaces';
 import { createLogger } from '../../common/services/logger.service';
+
+/** Whether a config field is a secret, or holds one at any depth. */
+const holdsSecret = (field: PluginConfigField | undefined): boolean =>
+  !!field &&
+  (field.secret === true || Object.values(field.properties ?? {}).some(holdsSecret) || holdsSecret(field.items));
+
+const isDefined = (value: unknown): boolean => value != null && value !== '';
 
 /**
  * Owns the provisioning bridge that makes a persisted plugin instance's config reach the ingress
@@ -22,7 +34,8 @@ export class ScopeBindingService implements OnApplicationBootstrap {
     private readonly instances: PluginInstanceService,
     private readonly loader: PluginLoaderService,
     private readonly audit: AuditService,
-    private readonly sessions: SessionService,
+    @InjectRepository(Session, 'data')
+    private readonly sessions: Repository<Session>,
   ) {}
 
   /**
@@ -38,13 +51,19 @@ export class ScopeBindingService implements OnApplicationBootstrap {
    * cannot abort the rest.
    */
   async onApplicationBootstrap(): Promise<void> {
-    let rows: PluginInstance[];
     try {
-      rows = await this.instances.listAll();
+      await this.reconcile();
     } catch (err) {
-      this.logger.error('Scope-binding reconciliation skipped (failed to list instances)', String(err));
-      return;
+      this.logger.error('Scope-binding reconciliation failed', String(err));
     }
+  }
+
+  /**
+   * The boot pass itself, shared with {@link resyncAfterImport}. Rejects only when the instance rows
+   * cannot be listed; a single binding failure is absorbed by applyScopeBinding.
+   */
+  async reconcile(): Promise<void> {
+    const rows = await this.instances.listAll();
 
     // Order-independent reconciliation: listAll() is repo.find() with no ORDER BY, so its row order
     // is DB/restart-dependent (differs between SQLite and Postgres). applyScopeBinding mutates the
@@ -80,6 +99,40 @@ export class ScopeBindingService implements OnApplicationBootstrap {
   }
 
   /**
+   * Bring the runtime bindings back in line after a restore replaced every `plugin_instances` row.
+   *
+   * The boot pass only adds, so on its own it can never retire a binding whose instance the restore
+   * dropped (or restored disabled): the plugin would keep firing on that session with the retired
+   * instance's config, across restarts. So first tear down every scope that was bound by an enabled
+   * row BEFORE the import and is bound by no enabled row now, then re-run the boot pass over the
+   * restored rows. The teardown set comes only from the pre-import rows, never from activeSessions,
+   * so a session an operator activated through PUT /api/plugins/:id/sessions is left alone. The
+   * teardown is additive for the same reason: a restore makes no new narrowing decision, so it drops
+   * the retired scope without also retiring an operator's '*'. A retired wildcard still loses its '*'
+   * unless a restored wildcard row keeps it. applyScopeBinding runs after the commit, so its sibling
+   * checks read the restored rows.
+   */
+  async resyncAfterImport(
+    previous: ReadonlyArray<{ pluginId: string; sessionScope: string | null; enabled: boolean }>,
+  ): Promise<void> {
+    const bound = new Set(
+      (await this.instances.listAll())
+        .filter(row => row.enabled)
+        .map(row => `${row.pluginId}\u0000${sessionScopeKey(row.sessionScope)}`),
+    );
+    const retired = new Map<string, { pluginId: string; sessionScope: string | null }>();
+    for (const row of previous) {
+      const key = `${row.pluginId}\u0000${sessionScopeKey(row.sessionScope)}`;
+      if (row.enabled && !bound.has(key)) retired.set(key, row);
+    }
+    for (const { pluginId, sessionScope } of retired.values()) {
+      if (!this.loader.getPlugin(pluginId)) continue;
+      await this.applyScopeBinding(pluginId, sessionScope, {}, false, { additive: true });
+    }
+    await this.reconcile();
+  }
+
+  /**
    * Warn when a just-reconciled instance binds a concrete scope no session row matches — a session the
    * operator deleted, or a scope typed/copied wrong. The plugin is then activated for nothing: the
    * dispatch gate never matches that id, so it receives no events, while every signal an operator can
@@ -92,12 +145,12 @@ export class ScopeBindingService implements OnApplicationBootstrap {
   private async warnIfScopeHasNoSession(inst: PluginInstance): Promise<void> {
     if (!inst.sessionScope || inst.sessionScope === '*') return;
     try {
-      await this.sessions.findOne(inst.sessionScope);
-    } catch (err) {
-      // findOne throws NotFoundException only for a genuinely missing row. Any other failure (a DB
-      // hiccup mid-boot) is not evidence the session is gone, and reporting it as gone would send an
-      // operator hunting a binding that is in fact fine — so stay quiet rather than cry wolf.
-      if (!(err instanceof NotFoundException)) return;
+      // The same row read SessionService.findOne performs ({ where: { id } }), straight through the
+      // repository: a missing row resolves to null instead of throwing NotFoundException, and the
+      // service's runtime-state projection is more than this existence check needs.
+      const session = await this.sessions.findOne({ where: { id: inst.sessionScope } });
+      // A null row (and only a null row) means the session is genuinely missing.
+      if (session) return;
       this.logger.warn(
         `Plugin instance ${inst.pluginId}:${inst.instanceId} is bound to session '${inst.sessionScope}', which does not exist — it will receive no events until that session is restored or the instance is re-scoped`,
         {
@@ -107,6 +160,10 @@ export class ScopeBindingService implements OnApplicationBootstrap {
           sessionScope: inst.sessionScope,
         },
       );
+    } catch {
+      // A failure that throws (a DB hiccup mid-boot) is not evidence the session is gone, and
+      // reporting it as gone would send an operator hunting a binding that is in fact fine — so
+      // stay quiet rather than cry wolf.
     }
   }
 
@@ -128,13 +185,17 @@ export class ScopeBindingService implements OnApplicationBootstrap {
    * instance row would silently overwrite that operator choice — and bind the plugin to the row's
    * scope even when that session has since been deleted, leaving it activated for nothing. So the boot
    * path only ever ADDS the row's scope; it removes nothing.
+   *
+   * `previousConfig` is what an enabled wildcard instance contributed to the base config before the change
+   * being applied. The base config merges, so a secret that the instance no longer defines (activation) or
+   * no longer contributes at all (teardown) would otherwise stay in it; see retractedSecrets.
    */
   async applyScopeBinding(
     pluginId: string,
     scope: string | null,
     config: Record<string, unknown>,
     activate: boolean,
-    opts: { additive?: boolean } = {},
+    opts: { additive?: boolean; previousConfig?: Record<string, unknown> | null } = {},
   ): Promise<void> {
     try {
       if (!scope || scope === '*') {
@@ -144,19 +205,23 @@ export class ScopeBindingService implements OnApplicationBootstrap {
         // enabled instance still binds a wildcard/null scope — otherwise disabling/deleting a wildcard
         // instance would leave the plugin firing on every session with stale config.
         if (activate) {
-          this.loader.updatePluginConfig(pluginId, config);
+          this.loader.updatePluginConfig(pluginId, {
+            ...(await this.retractedSecrets(pluginId, config, opts.previousConfig)),
+            ...config,
+          });
           this.loader.setPluginSessions(pluginId, ['*']);
           return;
         }
-        const anyWildcardLeft = (await this.instances.list(pluginId)).some(
-          i => i.enabled && (!i.sessionScope || i.sessionScope === '*'),
-        );
+        const retracted = await this.retractedSecrets(pluginId, {}, opts.previousConfig);
+        if (Object.keys(retracted).length > 0) this.loader.updatePluginConfig(pluginId, retracted);
+        const rows = await this.instances.list(pluginId);
+        const anyWildcardLeft = rows.some(i => i.enabled && (!i.sessionScope || i.sessionScope === '*'));
         if (!anyWildcardLeft) {
+          // Activating a wildcard replaced activeSessions with ['*'], dropping the scopes enabled
+          // concrete siblings bind, so put those back rather than leave them silenced until a restart.
           const current = this.loader.getPlugin(pluginId)?.activeSessions ?? [];
-          this.loader.setPluginSessions(
-            pluginId,
-            current.filter(s => s !== '*'),
-          );
+          const concrete = rows.filter(i => i.enabled && i.sessionScope).map(i => i.sessionScope as string);
+          this.loader.setPluginSessions(pluginId, [...new Set([...current.filter(s => s !== '*'), ...concrete])]);
         }
         return;
       }
@@ -167,8 +232,23 @@ export class ScopeBindingService implements OnApplicationBootstrap {
       // instance being torn down.
       const siblings = await this.instances.list(pluginId);
       if (!activate && siblings.some(i => i.enabled && i.sessionScope === scope)) {
-        // A sibling still binds this scope: leave the session active and its sessionConfig intact —
-        // stripping either would silence the sibling until the next boot-time reconciliation.
+        // A sibling still binds this scope, so the SESSION stays active: dropping it would silence
+        // that sibling until the next boot-time reconciliation.
+        //
+        // The config slice does NOT survive with it. It is keyed by scope, so it holds whichever
+        // instance was projected last — usually the one being retired here — and once this teardown
+        // leaves a single enabled instance on the scope, dispatch re-declares the slice attributable
+        // to that survivor (PluginSandboxBridge.scopeHasAtMostOneInstance) and merges it beneath the
+        // survivor's own row. A survivor relying on a plugin default for a key it does not define
+        // was handed the retired tenant's endpoint and credentials for it — the cross-tenant collapse
+        // per-instance resolution exists to prevent, reachable by disabling or deleting one of two
+        // instances. Clearing costs the survivor nothing it owns: resolveInstanceConfig layers its
+        // own row on top either way, and boot reconciliation re-projects it.
+        //
+        // An operator's per-session override (PUT /plugins/:id/config/:sessionId) shares this slice
+        // and is cleared with it. That is the safe direction — provisioning already overwrites such
+        // an override, and a missing default beats another tenant's credential.
+        this.loader.setPluginSessionConfig(pluginId, scope, {});
         return;
       }
       this.loader.setPluginSessionConfig(pluginId, scope, activate ? config : {});
@@ -176,6 +256,12 @@ export class ScopeBindingService implements OnApplicationBootstrap {
       // Provisioning retires '*' (this instance narrows the plugin to one session); the additive boot
       // path keeps the restored set whole, so an operator's PUT /plugins/:id/sessions survives a restart.
       const set = new Set(opts.additive ? current : current.filter(s => s !== '*'));
+      // "*" covered the sessions of the plugin's other concrete instances too, so retiring it narrows the
+      // plugin to those scopes rather than to this one alone (the wildcard teardown above does the same).
+      // An explicit list has no "*" and stays as the operator set it.
+      if (!opts.additive && current.includes('*')) {
+        for (const i of siblings) if (i.enabled && i.sessionScope && i.sessionScope !== '*') set.add(i.sessionScope);
+      }
       if (activate) set.add(scope);
       else set.delete(scope);
       // Preserve '*' while an enabled wildcard/null sibling still binds all sessions ('*' subsumes
@@ -193,5 +279,41 @@ export class ScopeBindingService implements OnApplicationBootstrap {
         metadata: { pluginId, scope, bridgeError: String(err) },
       });
     }
+  }
+
+  /**
+   * What to write over the base config to take back the secrets `previous` held and `config` no longer
+   * defines (none, for a teardown). The wildcard projection only merges, so on its own it cannot delete a
+   * key: a secret the operator revoked, or one of an instance that was disabled, deleted or moved off the
+   * wildcard scope, would stay in the base config, in registry.json and in the config of every hook and
+   * ingress delivery. A key is taken back only while the base config still holds the value the instance
+   * put there. It is written as the value another enabled wildcard instance still defines (the last by id,
+   * as boot reconciliation replays them), else as null, which is how a removed top-level secret is stored
+   * there. Siblings are read only when a secret was actually removed.
+   */
+  private async retractedSecrets(
+    pluginId: string,
+    config: Record<string, unknown>,
+    previous: Record<string, unknown> | null | undefined,
+  ): Promise<Record<string, unknown>> {
+    const before = previous ?? {};
+    const plugin = this.loader.getPlugin(pluginId);
+    const properties = plugin?.manifest.configSchema?.properties ?? {};
+    const removed = Object.keys(before).filter(
+      key =>
+        holdsSecret(properties[key]) &&
+        isDefined(before[key]) &&
+        !isDefined(config[key]) &&
+        // Only what this instance put there: a value set on the plugin since, or one a sibling projected
+        // after it, is not the instance's to take back.
+        isDeepStrictEqual(plugin?.config[key], before[key]),
+    );
+    if (removed.length === 0) return {};
+    const siblings = (await this.instances.list(pluginId))
+      .filter(row => row.enabled && (!row.sessionScope || row.sessionScope === '*'))
+      .sort((a, b) => String(a.instanceId).localeCompare(String(b.instanceId)));
+    return Object.fromEntries(
+      removed.map(key => [key, siblings.findLast(row => isDefined(row.config?.[key]))?.config?.[key] ?? null]),
+    );
   }
 }

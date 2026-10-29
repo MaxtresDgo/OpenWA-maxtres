@@ -1,5 +1,5 @@
 import { Module, DynamicModule, Type } from '@nestjs/common';
-import { ServeStaticModule } from '@nestjs/serve-static';
+import { ServeStaticModule, ServeStaticModuleOptions } from '@nestjs/serve-static';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -9,6 +9,8 @@ import { RedisThrottlerStorage } from './common/throttler/redis-throttler.storag
 import { createThrottlerRedisClient } from './common/throttler/throttler-redis.client';
 import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
+import { createBootDataSource } from './database/pg-boot-migrations';
+import { createMainDataSource, mainConnectionOptions, SQLITE_BUSY_TIMEOUT_MS } from './database/main-connection';
 import { SessionModule } from './modules/session/session.module';
 import { MessageModule } from './modules/message/message.module';
 import { TemplateModule } from './modules/template/template.module';
@@ -44,6 +46,7 @@ import { PluginsApiModule } from './modules/plugins/plugins.module';
 import { AgentToolsModule } from './core/agent-tools/agent-tools.module';
 import { IntegrationModule } from './modules/integration/integration.module';
 import { SearchModule } from './modules/search/search.module';
+import { SqlitePermissionsBoot } from './database/sqlite-file-permissions';
 
 // Only import QueueModule if explicitly enabled to avoid Redis connection errors
 const queueModules: Array<Type | DynamicModule> = [];
@@ -88,29 +91,29 @@ export const DASHBOARD_DIST = path.resolve(__dirname, '..', 'dashboard', 'dist')
 export const dashboardServingEnabled = process.env.SERVE_DASHBOARD !== 'false';
 export const dashboardBuildPresent = fs.existsSync(path.join(DASHBOARD_DIST, 'index.html'));
 
+// Everything but the root, exported so the e2e suite boots these options and not a copy of them.
+export const DASHBOARD_STATIC_OPTIONS: Omit<ServeStaticModuleOptions, 'rootPath'> = {
+  // No `exclude`: the module's error handler rewrites every error raised on an excluded path into
+  // 404 "Cannot <method> <url>", which hid the body parsers' 413 and 400 under /api, /socket.io and
+  // /mcp. Nest answers unknown routes there on its own now that the fallback below is off.
+  // Disable this module's OWN catch-all SPA fallback. configure-app.ts already serves dashboard
+  // documents (it injects the per-response CSP nonce, which is why it must own them), and
+  // that handler is correctly narrow: it skips /assets and only answers extensionless paths
+  // or explicit text/html navigations. The built-in fallback here is not narrow — it answers
+  // EVERY unmatched GET with index.html, so a mistyped `<script src>` came back 200 HTML and
+  // the browser reported a JavaScript parse error instead of the real 404, hiding broken
+  // builds behind a confusing symptom. It is also outright broken when the install path
+  // contains a dot-segment (~/.openwa, a checkout under ~/.cache): it sends the index by
+  // ABSOLUTE path and Express's `send` refuses dot-segments, 404ing every client-side route.
+  // Turning it off fixes both, and makes behaviour identical on either path shape.
+  // ServeStaticModule has no explicit off switch, so this is a renderPath literal that no
+  // real request can match.
+  renderPath: '/__openwa_spa_fallback_owned_by_main_ts__',
+};
+
 const serveStaticModules: Array<Type | DynamicModule> = [];
 if (dashboardServingEnabled && dashboardBuildPresent) {
-  serveStaticModules.push(
-    ServeStaticModule.forRoot({
-      rootPath: DASHBOARD_DIST,
-      // Let Nest own these so unknown API/socket routes return real 404s/JSON rather
-      // than the SPA index.html fallback (Express 5 / path-to-regexp v8 wildcard syntax).
-      exclude: ['/api/{*splat}', '/socket.io/{*splat}', '/mcp', '/mcp/{*splat}'],
-      // Disable this module's OWN catch-all SPA fallback. main.ts already serves dashboard
-      // documents (it injects the per-response CSP nonce, which is why it must own them), and
-      // that handler is correctly narrow: it skips /assets and only answers extensionless paths
-      // or explicit text/html navigations. The built-in fallback here is not narrow — it answers
-      // EVERY unmatched GET with index.html, so a mistyped `<script src>` came back 200 HTML and
-      // the browser reported a JavaScript parse error instead of the real 404, hiding broken
-      // builds behind a confusing symptom. It is also outright broken when the install path
-      // contains a dot-segment (~/.openwa, a checkout under ~/.cache): it sends the index by
-      // ABSOLUTE path and Express's `send` refuses dot-segments, 404ing every client-side route.
-      // Turning it off fixes both, and makes behaviour identical on either path shape.
-      // ServeStaticModule has no explicit off switch, so this is a renderPath literal that no
-      // real request can match.
-      renderPath: '/__openwa_spa_fallback_owned_by_main_ts__',
-    }),
-  );
+  serveStaticModules.push(ServeStaticModule.forRoot({ rootPath: DASHBOARD_DIST, ...DASHBOARD_STATIC_OPTIONS }));
 }
 
 @Module({
@@ -127,27 +130,10 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
       name: 'main',
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => {
-        // Default ON for zero-config first boot. When disabled
-        // (MAIN_DATABASE_SYNCHRONIZE=false), the main-owned migrations create the
-        // api_keys/audit_logs schema instead — never both at once.
-        const synchronize = configService.get<boolean>('database.synchronize', true);
-        return {
-          name: 'main',
-          type: 'better-sqlite3' as const,
-          database: configService.get<string>('database.database', './data/main.sqlite'),
-          entities: [
-            __dirname + '/modules/auth/**/*.entity{.ts,.js}',
-            __dirname + '/modules/audit/**/*.entity{.ts,.js}',
-          ],
-          // Dedicated migrations dir for the main connection only (must NOT run the
-          // data-connection migrations, which target session/webhook/message tables).
-          migrations: [__dirname + '/database/migrations-main/*{.ts,.js}'],
-          synchronize,
-          migrationsRun: !synchronize,
-          logging: configService.get<boolean>('database.logging', false),
-        };
-      },
+      // Migrations always, then synchronize on MAIN_DATABASE_SYNCHRONIZE=true; the factory refuses a
+      // file whose schema does not match this release (see main-connection.ts).
+      useFactory: (configService: ConfigService) => mainConnectionOptions(configService),
+      dataSourceFactory: createMainDataSource,
     }),
 
     // Data Storage Database (pluggable - user data)
@@ -155,6 +141,11 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
       name: 'data',
       imports: [ConfigModule],
       inject: [ConfigService],
+      // The postgres branch runs its boot migrations under a cross-replica advisory lock inside
+      // this factory (see pg-boot-migrations.ts) instead of TypeORM's unsynchronized built-in
+      // migrationsRun; SQLite with synchronize is initialized there too, to deduplicate terminal webhook
+      // failures before the schema sync, and other sqlite options keep the library's default path.
+      dataSourceFactory: createBootDataSource,
       useFactory: (configService: ConfigService) => {
         const dbType = configService.get<'sqlite' | 'postgres'>('dataDatabase.type', 'sqlite');
         const baseConfig = {
@@ -174,7 +165,8 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
 
         if (dbType === 'postgres') {
           // Schema selection: 'public' (default) is a no-op vs the historical behavior. A non-public
-          // schema additionally sets the session search_path via pg's startup `options` parameter so
+          // schema additionally sets the session search_path (createBootDataSource runs it as a statement on
+          // connect rather than in the startup packet) so
           // the project's RAW, unqualified migration SQL (CREATE TABLE "x"..., ALTER TABLE "y"...)
           // resolves to the configured schema — TypeORM's `schema` option alone does NOT set
           // search_path, so without this raw DDL would land in `public` while the migration ledger
@@ -198,7 +190,11 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
                 }
               : false,
 
-            // Never auto-sync Postgres in production; rely on migrations.
+            // Never auto-sync Postgres in production; rely on migrations. Boot migrations execute
+            // inside createBootDataSource (dataSourceFactory above) under the advisory lock — this
+            // flag states the intent and remains the built-in fallback if that factory is ever
+            // bypassed (the factory constructs the DataSource with migrationsRun:false and calls
+            // runMigrations() itself while holding the lock).
             synchronize: configService.get<boolean>('dataDatabase.synchronize', false),
             migrationsRun: true,
             retryAttempts: 10,
@@ -206,13 +202,14 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
             extra: {
               max: configService.get<number>('dataDatabase.poolSize', 10),
               // Runtime query/pool timeouts so a stuck query or saturated pool fails fast instead of
-              // hanging requests. statement_timeout bounds live runtime queries; the boot migrations
-              // (migrationsRun above) reset it to 0 per-transaction via SET LOCAL, so a long
-              // CREATE INDEX / backfill at boot is never aborted by it.
+              // hanging requests. statement_timeout applies to the runtime pool only: the boot
+              // migration chain runs on a separate pool built without it (pg-boot-migrations.ts),
+              // so a long CREATE INDEX / backfill at boot is never aborted by it.
               statement_timeout: configService.get<number>('dataDatabase.statementTimeoutMs', 30000),
               idleTimeoutMillis: configService.get<number>('dataDatabase.idleTimeoutMs', 30000),
               connectionTimeoutMillis: configService.get<number>('dataDatabase.connectionTimeoutMs', 10000),
-              // Only set for a non-public schema (see above). `<schema>,public` keeps public on the
+              // Only set for a non-public schema (see above); createBootDataSource sets it on connect.
+              // `<schema>,public` keeps public on the
               // path so pg_catalog + any public helpers still resolve; the configured schema wins.
               ...(useCustomSearchPath ? { options: `-c search_path=${schema},public` } : {}),
             },
@@ -229,6 +226,7 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
           name: 'data',
           type: 'better-sqlite3' as const,
           database: configService.get<string>('dataDatabase.database', './data/openwa.sqlite'),
+          timeout: SQLITE_BUSY_TIMEOUT_MS,
           synchronize,
           migrationsRun: !synchronize,
         };
@@ -263,16 +261,19 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
         // API. The client is built fail-fast (see throttler-redis.client.ts) so that fail-open
         // engages immediately instead of after a queue/timeout stall per request.
         const redisStorage =
-          process.env.REDIS_ENABLED === 'true'
-            ? new RedisThrottlerStorage(createThrottlerRedisClient(configService))
-            : undefined;
+          process.env.REDIS_ENABLED === 'true' ? new RedisThrottlerStorage(createThrottlerRedisClient()) : undefined;
         return { throttlers, ...(redisStorage ? { storage: redisStorage } : {}) };
       },
     }),
 
     // Core modules
     HooksModule, // Global hook system for plugin integration
-    PluginsModule, // Global plugin system
+    // Global plugin system, kept ahead of ...queueModules. Nest runs the init hooks of global modules in the
+    // order it first meets them among the imports, and PluginLoaderService.onModuleInit must mark the plugins
+    // it restores before BullRegistrar starts the workers that take queued ingress jobs. This line and
+    // QueueModule's own import of PluginsModule each keep it ahead of BullModule; test/queue-on.e2e-spec.ts
+    // fails when neither does.
+    PluginsModule,
     LoggerModule,
     CacheModule,
     StorageModule,
@@ -310,5 +311,9 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
     ...mcpModules, // MCP Streamable-HTTP server (opt-in via MCP_ENABLED=true)
     ...serveStaticModules, // Bundled dashboard SPA (production single-port setup)
   ],
+  // Runs after every DataSource has initialized (they initialize eagerly in their provider
+  // factories, and onApplicationBootstrap fires after every onModuleInit), tightening the SQLite
+  // files that better-sqlite3 created with umask permissions back to owner-only.
+  providers: [SqlitePermissionsBoot],
 })
 export class AppModule {}

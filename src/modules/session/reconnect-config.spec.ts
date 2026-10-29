@@ -1,4 +1,5 @@
-import { resolveReconnectConfig, clampReconnectDelay } from './session.service';
+import { clampReconnectDelay } from './reconnect-policy';
+import { resolveReconnectConfig } from './session-engine-lifecycle.service';
 
 // an OPERATOR-supplied session.config flows into the reconnect backoff math unchecked.
 // config:{reconnectBaseDelay:'x'} makes the delay NaN -> setTimeout(fn, NaN) fires at 0 (relaunch
@@ -6,7 +7,7 @@ import { resolveReconnectConfig, clampReconnectDelay } from './session.service';
 // false). These helpers coerce + clamp the config so the math is always finite and bounded.
 describe('resolveReconnectConfig', () => {
   it('defaults to a 5000ms base delay and UNLIMITED attempts for absent or empty config', () => {
-    // A long-lived session must keep retrying forever (the backoff parks at the 1h cap) instead of
+    // A long-lived session must keep retrying forever (the backoff parks at the 5-minute cap) instead of
     // dying permanently after ~2.5 minutes like the old 5-attempt default did.
     expect(resolveReconnectConfig(null)).toEqual({ baseDelay: 5000, maxAttempts: Number.POSITIVE_INFINITY });
     expect(resolveReconnectConfig({})).toEqual({ baseDelay: 5000, maxAttempts: Number.POSITIVE_INFINITY });
@@ -19,6 +20,30 @@ describe('resolveReconnectConfig', () => {
     });
   });
 
+  it('treats null, undefined and blank values as unset, the way GET /config reports them', () => {
+    // GET /config reports the unlimited default as maxReconnectAttempts: null, so a client copying it into a
+    // create body sends that null; Number(null) is 0, which would disable reconnect and floor the delay.
+    expect(resolveReconnectConfig({ maxReconnectAttempts: null, reconnectBaseDelay: null })).toEqual({
+      baseDelay: 5000,
+      maxAttempts: Number.POSITIVE_INFINITY,
+    });
+    expect(resolveReconnectConfig({ maxReconnectAttempts: undefined, reconnectBaseDelay: undefined })).toEqual({
+      baseDelay: 5000,
+      maxAttempts: Number.POSITIVE_INFINITY,
+    });
+    expect(resolveReconnectConfig({ maxReconnectAttempts: '', reconnectBaseDelay: '  ' })).toEqual({
+      baseDelay: 5000,
+      maxAttempts: Number.POSITIVE_INFINITY,
+    });
+  });
+
+  it('keeps coercing numeric strings a create body may have stored', () => {
+    expect(resolveReconnectConfig({ maxReconnectAttempts: '5', reconnectBaseDelay: '8000' })).toEqual({
+      baseDelay: 8000,
+      maxAttempts: 5,
+    });
+  });
+
   it('clamps a huge baseDelay down to the 5-minute max (no infinite-timer wedge)', () => {
     expect(resolveReconnectConfig({ reconnectBaseDelay: 1e15 }).baseDelay).toBe(300_000);
   });
@@ -26,6 +51,11 @@ describe('resolveReconnectConfig', () => {
   it('clamps a negative/too-small baseDelay up to the 1s min (no immediate relaunch)', () => {
     expect(resolveReconnectConfig({ reconnectBaseDelay: -5 }).baseDelay).toBe(1000);
     expect(resolveReconnectConfig({ reconnectBaseDelay: 0 }).baseDelay).toBe(1000);
+  });
+
+  it('floors a fractional baseDelay that a row stored before validation may hold', () => {
+    expect(resolveReconnectConfig({ reconnectBaseDelay: 2500.5 }).baseDelay).toBe(2500);
+    expect(resolveReconnectConfig({ reconnectBaseDelay: '2500.9' }).baseDelay).toBe(2500);
   });
 
   it('clamps an explicit maxAttempts to the 0..20 range and floors fractions', () => {
@@ -50,6 +80,6 @@ describe('clampReconnectDelay', () => {
   });
 
   it('caps the exponential so it never exceeds setTimeout range and fires immediately', () => {
-    expect(clampReconnectDelay(1e15, 5000)).toBe(3_600_000);
+    expect(clampReconnectDelay(1e15, 5000)).toBe(300_000);
   });
 });

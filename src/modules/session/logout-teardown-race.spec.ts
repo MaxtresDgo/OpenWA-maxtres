@@ -39,6 +39,7 @@ function createMockSession(overrides: Partial<Session> = {}): Session {
     nodeId: null,
     claimedAt: null,
     leaseExpiresAt: null,
+    desiredState: null,
     nodeUrl: null,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -65,6 +66,15 @@ async function expectNameTeardownPending(p: Promise<unknown>): Promise<void> {
   expect(thrown?.response?.code).toBe('SESSION_NAME_TEARDOWN_PENDING');
 }
 
+/** The messages of a session are read through a query builder: every chain call returns itself, the raw read is empty. */
+const emptyMessageQuery = () => {
+  const query: Record<string, jest.Mock> = { getRawMany: jest.fn().mockResolvedValue([]) };
+  for (const name of ['select', 'addSelect', 'where', 'andWhere', 'orderBy', 'addOrderBy', 'limit']) {
+    query[name] = jest.fn().mockReturnValue(query);
+  }
+  return query;
+};
+
 describe('SessionService logout() name-scoped teardown fence', () => {
   let service: SessionService;
   // The teardown fence + lifecycle state live on the engine-lifecycle owner after the god-object
@@ -77,10 +87,17 @@ describe('SessionService logout() name-scoped teardown fence', () => {
     repository = {
       findOne: jest.fn().mockResolvedValue(createMockSession()),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      exists: jest.fn().mockResolvedValue(false),
     };
-    const messageRepository = { find: jest.fn().mockResolvedValue([]) };
+    const messageRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn(emptyMessageQuery),
+      delete: jest.fn(),
+    };
     const manager = { delete: jest.fn().mockResolvedValue({ affected: 1 }), remove: jest.fn() };
     const dataSource: Partial<DataSource> = {
+      options: { type: 'better-sqlite3' } as DataSource['options'],
+      getRepository: jest.fn(() => messageRepository) as unknown as DataSource['getRepository'],
       transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
         cb(manager),
       ) as unknown as DataSource['transaction'],
@@ -123,7 +140,7 @@ describe('SessionService logout() name-scoped teardown fence', () => {
           provide: ConfigService,
           useValue: { get: jest.fn().mockImplementation(<T>(_k: string, d?: T): T => d as T) },
         },
-        { provide: LidMappingStoreService, useValue: { remember: jest.fn() } },
+        { provide: LidMappingStoreService, useValue: { remember: jest.fn(), onSecondLid: jest.fn() } },
         { provide: StatusStoreService, useValue: { ingest: jest.fn() } },
       ],
     }).compile();
@@ -139,6 +156,43 @@ describe('SessionService logout() name-scoped teardown fence', () => {
   const errorsOf = () => (service as unknown as { sessionErrors: Map<string, string> }).sessionErrors;
   const lastStatusOf = () =>
     (lifecycle as unknown as { lastDispatchedStatus: Map<string, unknown> }).lastDispatchedStatus;
+
+  const rejectRebind = (previous: string, incoming: string, engine: unknown) =>
+    (
+      lifecycle as unknown as {
+        rejectRebind: (id: string, e: unknown, name: string, prev: string, inc: string) => Promise<void>;
+      }
+    ).rejectRebind(SESSION_UUID, engine, SESSION_NAME, previous, incoming);
+
+  it('rejectRebind logs the wrong account out, fails the session, and keeps the original binding', async () => {
+    const logout = jest.fn().mockResolvedValue(undefined);
+    const engine = { logout };
+    enginesOf().set(SESSION_UUID, engine);
+
+    await rejectRebind('628111', '628999', engine);
+
+    // The wrong account is torn down, the session is parked in FAILED with a reason naming both
+    // numbers, and the engine is dropped. The original binding is preserved: no `{ phone: null }`.
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(lastStatusOf().get(SESSION_UUID)).toBe(SessionStatus.FAILED);
+    expect(errorsOf().get(SESSION_UUID)).toEqual(expect.stringContaining('628111'));
+    expect(errorsOf().get(SESSION_UUID)).toEqual(expect.stringContaining('628999'));
+    expect(enginesOf().has(SESSION_UUID)).toBe(false);
+    expect(stoppingOf().has(SESSION_UUID)).toBe(true);
+    expect(repository.update).not.toHaveBeenCalledWith(SESSION_UUID, { phone: null });
+  });
+
+  it('rejectRebind on a stale engine does nothing (isLiveEngine gate)', async () => {
+    const logout = jest.fn().mockResolvedValue(undefined);
+    const staleEngine = { logout };
+    // A DIFFERENT engine is the live one, so the stale handler must not log out or fail the session.
+    enginesOf().set(SESSION_UUID, { logout: jest.fn() });
+
+    await rejectRebind('628111', '628999', staleEngine);
+
+    expect(logout).not.toHaveBeenCalled();
+    expect(lastStatusOf().get(SESSION_UUID)).not.toBe(SessionStatus.FAILED);
+  });
 
   it('quick-settling teardown: start waits for it, then proceeds', async () => {
     let releaseLogout!: () => void;
@@ -192,7 +246,7 @@ describe('SessionService logout() name-scoped teardown fence', () => {
 
       releaseLogout();
       await deleteCall;
-      expect(engineFactory.purgeSessionData).toHaveBeenCalledWith(SESSION_NAME);
+      expect(engineFactory.purgeSessionData).toHaveBeenCalledWith(SESSION_UUID, SESSION_NAME);
       expect(pendingOf().has(SESSION_NAME)).toBe(false);
     } finally {
       jest.useRealTimers();
@@ -229,6 +283,12 @@ describe('SessionService logout() name-scoped teardown fence', () => {
   it('old-name teardown still pending past 10s: delete rejects 409, transaction parent removal and purgeSessionData not called (unique name still reserved)', async () => {
     const manager = { delete: jest.fn().mockResolvedValue({ affected: 1 }), remove: jest.fn() };
     const dataSource: Partial<DataSource> = {
+      options: { type: 'better-sqlite3' } as DataSource['options'],
+      getRepository: jest.fn(() => ({
+        find: jest.fn().mockResolvedValue([]),
+        createQueryBuilder: jest.fn(emptyMessageQuery),
+        delete: jest.fn(),
+      })) as unknown as DataSource['getRepository'],
       transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
         cb(manager),
       ) as unknown as DataSource['transaction'],

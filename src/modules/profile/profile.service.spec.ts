@@ -28,6 +28,20 @@ describe('ProfileService', () => {
     expect(setProfileStatus).toHaveBeenCalledWith('');
   });
 
+  it('deleteProfilePicture delegates to the engine with no arguments (the account is implicit)', async () => {
+    const deleteProfilePicture = jest.fn().mockResolvedValue(undefined);
+    await makeService({ deleteProfilePicture }).deleteProfilePicture('s1');
+    // Called with nothing: the engine removes the picture of the account it is already bound to, so
+    // forwarding the sessionId here would be a jid the adapter never asked for.
+    expect(deleteProfilePicture).toHaveBeenCalledWith();
+  });
+
+  it('deleteProfilePicture throws 400 when the engine is missing', () => {
+    // The route carries no body, so this guard is the only pre-check standing between the caller and
+    // the adapter.
+    expect(() => makeService(undefined).deleteProfilePicture('s1')).toThrow(BadRequestException);
+  });
+
   describe('setProfilePicture', () => {
     it('rejects a body with neither url nor base64 (400)', () => {
       // The guard throws synchronously (the service method is a thin sync pass-through, like GroupService).
@@ -40,6 +54,16 @@ describe('ProfileService', () => {
       expect(() => svc.setProfilePicture('s1', { base64: 'QUJD' })).toThrow(
         'mimetype is required when using base64 data',
       );
+    });
+
+    it('rejects a url that is not an absolute http(s) URL (400), also when it reaches the service without the DTO', () => {
+      const setProfilePicture = jest.fn();
+      const svc = makeService({ setProfilePicture });
+      for (const url of ['ftp://example.com/a.jpg', 'example.com/a.jpg']) {
+        expect(() => svc.setProfilePicture('s1', { url })).toThrow(BadRequestException);
+        expect(() => svc.setProfilePicture('s1', { url })).toThrow('url must be an absolute http(s) URL');
+      }
+      expect(setProfilePicture).not.toHaveBeenCalled();
     });
 
     it('maps a base64 body to a MediaInput (base64 wins over a stale url, #670)', async () => {

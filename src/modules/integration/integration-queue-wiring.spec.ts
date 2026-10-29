@@ -29,6 +29,7 @@ jest.mock('bullmq', () => {
       this.name = name;
     }
     add = jest.fn().mockResolvedValue(undefined);
+    waitUntilReady = jest.fn().mockResolvedValue(undefined);
     close = jest.fn().mockResolvedValue(undefined);
     disconnect = jest.fn().mockResolvedValue(undefined);
   }
@@ -77,6 +78,8 @@ describe('IntegrationModule queue wiring (QUEUE_ENABLED conditional)', () => {
       require('../../core/plugins/plugins.module') as typeof import('../../core/plugins/plugins.module');
     const { AuditService } = require('../audit/audit.service') as typeof import('../audit/audit.service');
     const { EventsGateway } = require('../events/events.gateway') as typeof import('../events/events.gateway');
+    const { EngineRegistry } =
+      require('../../engine/engine-registry.service') as typeof import('../../engine/engine-registry.service');
     const { QueueModule } = require('../queue/queue.module') as typeof import('../queue/queue.module');
     const { QUEUE_NAMES } = require('../queue/queue-names') as typeof import('../queue/queue-names');
     /* eslint-enable @typescript-eslint/no-require-imports */
@@ -97,8 +100,12 @@ describe('IntegrationModule queue wiring (QUEUE_ENABLED conditional)', () => {
         { provide: getDataSourceToken('data'), useValue: dataSourceStub },
         { provide: AuditService, useValue: { record: jest.fn() } },
         { provide: EventsGateway, useValue: {} },
+        // IngressService's liveness probe reads this registry (EngineModule is @Global in the real
+        // app, imported once by app.module.ts; this spec never boots that far, so it is stubbed the
+        // same way as the other app-level globals above).
+        { provide: EngineRegistry, useValue: {} },
       ],
-      exports: [getDataSourceToken('data'), AuditService, EventsGateway],
+      exports: [getDataSourceToken('data'), AuditService, EventsGateway, EngineRegistry],
     };
 
     const moduleRef = await Test.createTestingModule({
@@ -143,8 +150,8 @@ describe('IntegrationModule queue wiring (QUEUE_ENABLED conditional)', () => {
       const enqueue = moduleRef.get(IngressEnqueueService, { strict: false });
       expect(() => enqueue.onApplicationBootstrap()).not.toThrow();
 
-      // ...and the full queued-dispatch contract holds: enqueue() hands the job to BullMQ (with the
-      // deliveryId as jobId) instead of falling back to inline dispatch.
+      // ...and the full queued-dispatch contract holds: enqueue() hands the job to BullMQ (keyed by the
+      // namespaced deliveryId hash) instead of falling back to inline dispatch.
       const outcome = await enqueue.enqueue(
         {
           pluginId: 'chatwoot',
@@ -159,8 +166,10 @@ describe('IntegrationModule queue wiring (QUEUE_ENABLED conditional)', () => {
       expect(queue.add).toHaveBeenCalledWith(
         'ingress',
         expect.objectContaining({ deliveryId: 'd1' }),
-        expect.objectContaining({ jobId: 'd1' }),
+        expect.anything(),
       );
+      const [, , opts] = queue.add.mock.calls[0] as [string, unknown, { jobId: string }];
+      expect(opts.jobId).toMatch(/^ing-[0-9a-f]{40}$/);
     } finally {
       await moduleRef.close();
     }
@@ -180,5 +189,81 @@ describe('IntegrationModule queue wiring (QUEUE_ENABLED conditional)', () => {
     } finally {
       await moduleRef.close();
     }
+  });
+
+  // The ingress door treats a delivery for a plugin the boot restore has not finished with differently. Both
+  // decisions are dependencies of the pure pipeline, so only the real graph can show they are connected.
+  it('hands IngressService the restore state of the real plugin loader', async () => {
+    const { moduleRef } = await compileIntegrationModule('false');
+    try {
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const { IngressService } = require('./ingress.service') as typeof import('./ingress.service');
+      const { PluginLoaderService } =
+        require('../../core/plugins/plugin-loader.service') as typeof import('../../core/plugins/plugin-loader.service');
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      const ingress = moduleRef.get(IngressService, { strict: false });
+      const loader = moduleRef.get(PluginLoaderService, { strict: false });
+      const { restorePending } = (ingress as unknown as { deps: { restorePending?: (id: string) => boolean } }).deps;
+
+      expect(restorePending?.('adapter')).toBe(false);
+      (loader as unknown as { restorePending: Set<string> }).restorePending.add('adapter');
+      expect(restorePending?.('adapter')).toBe(true);
+      expect(restorePending?.('other')).toBe(false);
+    } finally {
+      await moduleRef.close();
+    }
+  });
+
+  describe('deferring the dispatch of a persisted delivery for a plugin that is still restoring', () => {
+    const ORIGINAL_INTERVAL = process.env.INGRESS_RECONCILE_INTERVAL_MS;
+    afterEach(() => {
+      if (ORIGINAL_INTERVAL === undefined) delete process.env.INGRESS_RECONCILE_INTERVAL_MS;
+      else process.env.INGRESS_RECONCILE_INTERVAL_MS = ORIGINAL_INTERVAL;
+    });
+
+    /** The deferDispatch dependency of the real IngressService, with `adapter` marked as restoring. */
+    async function deferDispatchFor(queueEnabled: 'true' | 'false') {
+      const { moduleRef } = await compileIntegrationModule(queueEnabled);
+      /* eslint-disable @typescript-eslint/no-require-imports */
+      const { IngressService } = require('./ingress.service') as typeof import('./ingress.service');
+      const { PluginLoaderService } =
+        require('../../core/plugins/plugin-loader.service') as typeof import('../../core/plugins/plugin-loader.service');
+      /* eslint-enable @typescript-eslint/no-require-imports */
+      const ingress = moduleRef.get(IngressService, { strict: false });
+      const loader = moduleRef.get(PluginLoaderService, { strict: false });
+      (loader as unknown as { restorePending: Set<string> }).restorePending.add('adapter');
+      const { deferDispatch } = (ingress as unknown as { deps: { deferDispatch?: (id: string) => boolean } }).deps;
+      return { moduleRef, deferDispatch: deferDispatch as (id: string) => boolean };
+    }
+
+    it('waits for the reconciler when the queue is off and the plugin is restoring', async () => {
+      delete process.env.INGRESS_RECONCILE_INTERVAL_MS;
+      const { moduleRef, deferDispatch } = await deferDispatchFor('false');
+      try {
+        expect(deferDispatch('adapter')).toBe(true);
+        expect(deferDispatch('other')).toBe(false);
+      } finally {
+        await moduleRef.close();
+      }
+    });
+
+    it('does not wait when a queue takes the job, which the processor holds', async () => {
+      const { moduleRef, deferDispatch } = await deferDispatchFor('true');
+      try {
+        expect(deferDispatch('adapter')).toBe(false);
+      } finally {
+        await moduleRef.close();
+      }
+    });
+
+    it('does not wait when the reconciler is off, since nothing would ever replay the row', async () => {
+      process.env.INGRESS_RECONCILE_INTERVAL_MS = '0';
+      const { moduleRef, deferDispatch } = await deferDispatchFor('false');
+      try {
+        expect(deferDispatch('adapter')).toBe(false);
+      } finally {
+        await moduleRef.close();
+      }
+    });
   });
 });

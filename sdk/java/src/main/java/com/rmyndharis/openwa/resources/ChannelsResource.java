@@ -8,7 +8,9 @@ import com.rmyndharis.openwa.model.ChannelMessageQuery;
 import com.rmyndharis.openwa.model.ChannelMessageRecord;
 import com.rmyndharis.openwa.model.ChannelRecord;
 import com.rmyndharis.openwa.model.CreateChannelRequest;
+import com.rmyndharis.openwa.model.DemoteChannelAdminRequest;
 import com.rmyndharis.openwa.model.MuteChannelRequest;
+import com.rmyndharis.openwa.model.TransferChannelOwnershipRequest;
 import com.rmyndharis.openwa.model.SubscribeChannelRequest;
 import com.rmyndharis.openwa.model.SuccessResult;
 import java.util.List;
@@ -25,7 +27,10 @@ public final class ChannelsResource {
         this.client = client;
     }
 
-    /** List all channels/newsletters the session is subscribed to. */
+    /**
+     * List all channels/newsletters the session is subscribed to. whatsapp-web.js only; Baileys
+     * answers {@code 501}.
+     */
     public List<ChannelRecord> list(String sessionId) {
         return client.requestList(
             HttpMethod.GET, "/api/sessions/" + encodeSegment(sessionId) + "/channels", null, null, ChannelRecord.class);
@@ -41,7 +46,7 @@ public final class ChannelsResource {
             ChannelRecord.class);
     }
 
-    /** Get recent messages from a channel. */
+    /** Get recent messages from a channel. whatsapp-web.js only; Baileys answers {@code 501}. */
     public List<ChannelMessageRecord> messages(String sessionId, String channelId, ChannelMessageQuery query) {
         return client.requestList(
             HttpMethod.GET,
@@ -82,7 +87,10 @@ public final class ChannelsResource {
             SuccessResult.class);
     }
 
-    /** Subscribe to a channel using its invite code. Requires an OPERATOR-level key. */
+    /**
+     * Subscribe to a channel using its invite code. Requires an OPERATOR-level key. Baileys only;
+     * whatsapp-web.js answers {@code 501}.
+     */
     public ChannelRecord subscribe(String sessionId, SubscribeChannelRequest body) {
         return client.request(
             HttpMethod.POST,
@@ -101,4 +109,34 @@ public final class ChannelsResource {
             null,
             SuccessResult.class);
     }
+    /**
+     * Demote a channel admin back to a subscriber. Requires an OPERATOR-level key.
+     *
+     * <p>There is no promote counterpart: neither engine library has one, so an admin is promoted
+     * from the WhatsApp app and demoted here. The whatsapp-web.js engine answers {@code 501}.
+     */
+    public SuccessResult demoteAdmin(String sessionId, String channelId, DemoteChannelAdminRequest body) {
+        return client.request(
+            HttpMethod.POST,
+            "/api/sessions/" + encodeSegment(sessionId) + "/channels/" + encodeSegment(channelId) + "/admins/demote",
+            null,
+            body,
+            SuccessResult.class);
+    }
+
+    /**
+     * Hand a channel to a new owner. Requires an OPERATOR-level key.
+     *
+     * <p><b>Irreversible</b>: once the transfer lands this account stops being the owner and cannot
+     * take the channel back. The whatsapp-web.js engine answers {@code 501}.
+     */
+    public SuccessResult transferOwnership(String sessionId, String channelId, TransferChannelOwnershipRequest body) {
+        return client.request(
+            HttpMethod.POST,
+            "/api/sessions/" + encodeSegment(sessionId) + "/channels/" + encodeSegment(channelId) + "/owner/transfer",
+            null,
+            body,
+            SuccessResult.class);
+    }
+
 }

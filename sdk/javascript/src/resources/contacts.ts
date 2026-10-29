@@ -42,7 +42,7 @@ export class ContactsResource {
     });
   }
 
-  /** Check whether a phone number is registered on WhatsApp. */
+  /** Check whether a phone number is registered on WhatsApp. Requires an OPERATOR-level key. */
   check(sessionId: string, number: string): Promise<CheckNumberResponse> {
     return this.client.request<CheckNumberResponse>({
       method: 'GET',
@@ -111,6 +111,19 @@ export class ContactsResource {
     return this.client.request<SuccessResult>({
       method: 'DELETE',
       path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}/block`,
+    });
+  }
+
+  /**
+   * List the JIDs this account has blocked.
+   *
+   * Session-wide, so it takes no contact id — unlike {@link block} and {@link unblock}, which act on
+   * one contact. Resolves a bare array of ids, not contact records.
+   */
+  listBlocked(sessionId: string): Promise<string[]> {
+    return this.client.request<string[]>({
+      method: 'GET',
+      path: `/api/sessions/${encodeSegment(sessionId)}/contacts/blocked`,
     });
   }
 }

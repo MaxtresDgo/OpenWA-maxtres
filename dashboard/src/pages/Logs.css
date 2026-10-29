@@ -44,6 +44,11 @@
   outline: none;
 }
 
+.logs-page .search-input:focus-within {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
 .logs-page .filter-group {
   display: flex;
   align-items: center;
@@ -80,7 +85,7 @@
 /* Unified row styling - same class for header and data */
 .logs-page .logs-table .table-row {
   display: grid;
-  grid-template-columns: 180px 200px 150px 150px 150px 1fr 120px;
+  grid-template-columns: 180px 200px 150px 150px 150px 1fr;
   gap: 1rem;
   padding: 1rem 1.5rem;
   align-items: center;
@@ -119,6 +124,16 @@
   white-space: nowrap;
 }
 
+/* The row's message, which some actions use to name what happened: wraps under the action. */
+.logs-page .action .log-message {
+  display: block;
+  margin-top: 0.25rem;
+  font-weight: 400;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .logs-page .api-key {
   font-family: monospace;
   font-size: 0.8125rem;
@@ -128,14 +143,6 @@
 .logs-page .ip {
   font-family: monospace;
   font-size: 0.8125rem;
-  white-space: nowrap;
-}
-
-.logs-page .details {
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -161,12 +168,12 @@
 
 .logs-page .severity-badge.warn {
   background: rgba(245, 158, 11, 0.15);
-  color: var(--warning);
+  color: var(--warning-text);
 }
 
 .logs-page .severity-badge.error {
   background: rgba(239, 68, 68, 0.12);
-  color: var(--error);
+  color: var(--error-text);
 }
 
 .logs-page .pagination {
@@ -210,7 +217,7 @@
 .logs-page .page-numbers button.active {
   background: var(--primary);
   border-color: var(--primary);
-  color: white;
+  color: #0f172a;
 }
 
 /* Empty Table State */
@@ -286,7 +293,7 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    text-align: left;
+    text-align: start;
     gap: 0.5rem;
     padding: 1rem;
     background: var(--bg-white);
@@ -296,11 +303,11 @@
     margin-bottom: 0.75rem;
   }
 
-  /* Cells inherit centering from the desktop grid; force a left-aligned, scannable card. */
+  /* Cells inherit centering from the desktop grid; force a start-aligned, scannable card. */
   .logs-page .logs-table .table-row:not(.header) > span {
     width: 100%;
     justify-content: flex-start;
-    text-align: left;
+    text-align: start;
   }
 
   .logs-page .logs-table .table-row:not(.header):hover {

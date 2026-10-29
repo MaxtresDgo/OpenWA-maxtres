@@ -5,32 +5,90 @@ import {
   IsNotEmpty,
   IsOptional,
   MaxLength,
-  IsUrl,
-  ValidateIf,
   IsArray,
   ArrayMaxSize,
   IsBoolean,
+  IsObject,
   Validate,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { IsMentionWidConstraint } from './is-mention-wid.validator';
-import { ToStrictBoolean } from '../../../common/utils/strict-boolean';
+import { ToStrictArray, ToStrictBoolean, ToStrictString } from '../../../common/utils/strict-boolean';
+import { IsMediaUrl } from '../../../common/media/media-url';
+import { stripBase64DataUri } from '../media-cap.util';
 
-const MENTIONS_DESCRIPTION =
+export const MENTIONS_DESCRIPTION =
   'WIDs to @mention (e.g. ["62811@c.us"]). The text/caption must also contain the @<number> token.';
+
+/**
+ * Caps for a `mentions` array, exported because the field appears on every REST route whose engine
+ * can carry it (send, reply, edit, template, bulk) and on the matching agent-tool schemas. Inline
+ * literals repeated per site is how the two numbers would drift apart between endpoints that share
+ * one documented contract, and the tool path needs them most: it calls the service directly, so the
+ * ValidationPipe never runs and the zod schema is the only cap there is.
+ */
+export const MENTIONS_MAX = 1024;
+export const MENTION_WID_MAX_LENGTH = 64;
+
+/**
+ * Caps for a custom link preview, exported for the same reason as the mentions pair above: the
+ * agent-tool schema restates nothing, and that path never reaches the ValidationPipe.
+ */
+export const CUSTOM_PREVIEW_URL_MAX_LENGTH = 2048;
+export const CUSTOM_PREVIEW_TITLE_MAX_LENGTH = 256;
+export const CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH = 1024;
 
 // Single source of truth for the text-body cap, shared with the agent-tool input schemas
 // (src/core/agent-tools/tools/message.tools.ts) so MCP and REST enforce the same limit.
 export const MESSAGE_TEXT_MAX_LENGTH = 4096;
 
+/**
+ * Caps for the ids a caller chooses: a chat id and a bulk batch id. Both end up in a btree index
+ * (the message chat indexes, UNIQUE(sessionId, batchId)), and PostgreSQL refuses an index entry past
+ * about 2.7 KB with an error the client sees as a 500, where SQLite takes any length. A WhatsApp JID is
+ * well under 100 characters, so 255 leaves room for every real id and matches the idempotency key cap.
+ */
+export const CHAT_ID_MAX_LENGTH = 255;
+export const BATCH_ID_MAX_LENGTH = 255;
+
+/**
+ * The structural check on a chat id for the chat routes that also verify its form: localpart@host with
+ * no whitespace, engine-neutral so another engine's JID scheme (Baileys' `@s.whatsapp.net`) passes and
+ * the adapter normalises further. Exported so the MCP tools that reach the same operations hold the
+ * rule too: they call the service directly, and a restated pattern is how the two drift apart.
+ */
+export const CHAT_JID_PATTERN = /^[^\s@]+@[^\s@]+$/;
+export const CHAT_JID_MESSAGE = 'chatId must be a valid chat JID in the form localpart@host';
+
+// The cap on a prompt choice's id. It must equal BUTTON_TEXT_MAX_LENGTH in the Baileys message
+// mapper, which refuses to offer any inbound choice whose id is longer, so an id past this bound
+// can never name a choice that exists. Validating it against the text cap instead accepted such a
+// request and let the engine answer a confusing "unknown button" a few layers later.
+export const BUTTON_ID_MAX_LENGTH = 256;
+
+/**
+ * Shared wording for the quoted-send field (issue #1271). One constant rather than five copies so
+ * the two engine caveats — different id dialects, and Baileys' store requirement — cannot drift
+ * apart between the endpoints that all accept the same field.
+ */
+export const QUOTED_MESSAGE_ID_DESCRIPTION =
+  'Quote an earlier message, turning this send into a reply. The id is engine-specific: ' +
+  'whatsapp-web.js matches the serialized message id, Baileys matches the raw message key id and ' +
+  'can only quote a message it has already stored. An id that cannot be resolved fails the send ' +
+  'rather than delivering it unquoted.';
+export const QUOTED_MESSAGE_ID_EXAMPLE = 'true_628123456789@c.us_3EB0ABCD';
+
 export class CustomLinkPreviewDto {
   @ApiProperty({
     description: 'The URL as it appears in the message text — WhatsApp anchors the preview to it.',
     example: 'https://example.com/launch',
+    maxLength: CUSTOM_PREVIEW_URL_MAX_LENGTH,
   })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
-  @MaxLength(2048)
+  @MaxLength(CUSTOM_PREVIEW_URL_MAX_LENGTH)
   url!: string;
 
   @ApiProperty({
@@ -38,25 +96,51 @@ export class CustomLinkPreviewDto {
     example: 'We just launched',
     maxLength: 256,
   })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
-  @MaxLength(256)
+  @MaxLength(CUSTOM_PREVIEW_TITLE_MAX_LENGTH)
   title!: string;
 
   @ApiPropertyOptional({ description: 'Preview description', example: 'Read the announcement.', maxLength: 1024 })
   @IsOptional()
+  @ToStrictString()
   @IsString()
-  @MaxLength(1024)
+  @MaxLength(CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH)
   description?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Preview image URL (http/https), fetched by the gateway under the same SSRF rules as a media URL. ' +
+      'Rendered as the large preview card. At most 5 MiB.',
+    example: 'https://example.com/launch.jpg',
+  })
+  @IsOptional()
+  // base64 wins when it holds data, as on the media routes, so a url next to it is not fetched and not checked.
+  @IsMediaUrl<CustomLinkPreviewDto>({ ignoreWhen: o => !!stripBase64DataUri(o.thumbnailBase64) })
+  thumbnailUrl?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Preview image as base64, with or without a data: prefix. Wins over thumbnailUrl. At most 5 MiB decoded.',
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  thumbnailBase64?: string;
 }
 
 export class SendTextMessageDto {
   @ApiProperty({
     description: 'WhatsApp chat ID (phone@c.us for individual, groupId@g.us for groups)',
     example: '628123456789@c.us',
+    maxLength: CHAT_ID_MAX_LENGTH,
   })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiProperty({
@@ -64,17 +148,25 @@ export class SendTextMessageDto {
     example: 'Hello from OpenWA!',
     maxLength: MESSAGE_TEXT_MAX_LENGTH,
   })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   @MaxLength(MESSAGE_TEXT_MAX_LENGTH)
   text!: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
+  @ToStrictArray()
   @IsArray()
-  @ArrayMaxSize(1024)
+  @ArrayMaxSize(MENTIONS_MAX)
   @IsString({ each: true })
-  @MaxLength(64, { each: true })
+  @MaxLength(MENTION_WID_MAX_LENGTH, { each: true })
   @Validate(IsMentionWidConstraint, { each: true })
   mentions?: string[];
 
@@ -96,15 +188,27 @@ export class SendTextMessageDto {
   @ApiPropertyOptional({
     type: CustomLinkPreviewDto,
     description:
-      'Attach a preview you supply yourself, instead of one fetched from the URL. Nothing is ' +
-      'fetched for these, so a preview can be attached even for a URL this server cannot reach. ' +
+      'Attach a preview you supply yourself, instead of one fetched from the URL. The page at `url` ' +
+      'is never fetched, so a preview can be attached even for a URL this server cannot reach; only ' +
+      'a `thumbnailUrl`, when given, is. ' +
       '**Baileys only** — whatsapp-web.js takes a boolean and answers `501`. Cannot be combined ' +
       'with `linkPreview: false`, which asks for the opposite.',
   })
   @IsOptional()
+  @IsObject()
   @ValidateNested()
   @Type(() => CustomLinkPreviewDto)
   customLinkPreview?: CustomLinkPreviewDto;
+
+  @ApiPropertyOptional({
+    description: QUOTED_MESSAGE_ID_DESCRIPTION,
+    example: QUOTED_MESSAGE_ID_EXAMPLE,
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  quotedMessageId?: string;
 }
 
 /**
@@ -138,9 +242,13 @@ export class SendMediaMessageDto {
   @ApiProperty({
     description: 'WhatsApp chat ID',
     example: '628123456789@c.us',
+    maxLength: CHAT_ID_MAX_LENGTH,
   })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(CHAT_ID_MAX_LENGTH)
+  @Matches(CHAT_JID_PATTERN, { message: CHAT_JID_MESSAGE })
   chatId!: string;
 
   @ApiPropertyOptional({
@@ -148,16 +256,17 @@ export class SendMediaMessageDto {
     example: 'https://example.com/image.jpg',
   })
   @IsOptional()
-  @IsUrl()
-  @ValidateIf((o: SendMediaMessageDto) => !o.base64)
+  // base64 wins when it holds data, so a url next to it is not fetched and not checked; a base64 that
+  // is only a data-URI prefix strips to nothing, and then the url is what gets sent.
+  @IsMediaUrl<SendMediaMessageDto>({ ignoreWhen: o => !!stripBase64DataUri(o.base64) })
   url?: string;
 
   @ApiPropertyOptional({
     description: 'Base64 encoded media data',
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
-  @ValidateIf((o: SendMediaMessageDto) => !o.url)
   base64?: string;
 
   @ApiPropertyOptional({
@@ -165,6 +274,7 @@ export class SendMediaMessageDto {
     example: 'image/jpeg',
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   mimetype?: string;
 
@@ -172,8 +282,10 @@ export class SendMediaMessageDto {
     description:
       "Filename for the media. Only rendered on document sends — defaults to 'file' when omitted (a URL-based document send on whatsapp-web.js first derives the URL basename)",
     example: 'image.jpg',
+    maxLength: 255,
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   @MaxLength(255)
   filename?: string;
@@ -184,18 +296,36 @@ export class SendMediaMessageDto {
     maxLength: 1024,
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   @MaxLength(1024)
   caption?: string;
 
-  @ApiPropertyOptional({ description: MENTIONS_DESCRIPTION, example: ['628123456789@c.us'], type: [String] })
+  @ApiPropertyOptional({
+    description: MENTIONS_DESCRIPTION,
+    example: ['628123456789@c.us'],
+    type: [String],
+    maxItems: MENTIONS_MAX,
+    items: { type: 'string', maxLength: MENTION_WID_MAX_LENGTH },
+  })
   @IsOptional()
+  @ToStrictArray()
   @IsArray()
-  @ArrayMaxSize(1024)
+  @ArrayMaxSize(MENTIONS_MAX)
   @IsString({ each: true })
-  @MaxLength(64, { each: true })
+  @MaxLength(MENTION_WID_MAX_LENGTH, { each: true })
   @Validate(IsMentionWidConstraint, { each: true })
   mentions?: string[];
+
+  @ApiPropertyOptional({
+    description: QUOTED_MESSAGE_ID_DESCRIPTION,
+    example: QUOTED_MESSAGE_ID_EXAMPLE,
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  @IsNotEmpty()
+  quotedMessageId?: string;
 }
 
 /**
@@ -227,7 +357,36 @@ export const SEND_AUDIO_BODY_EXAMPLES = mediaBodyExample('https://example.com/au
 export const SEND_DOCUMENT_BODY_EXAMPLES = mediaBodyExample('https://example.com/report.pdf', {
   filename: 'report.pdf',
 });
-export const SEND_STICKER_BODY_EXAMPLES = mediaBodyExample('https://example.com/sticker.png');
+export const SEND_STICKER_BODY_EXAMPLES = mediaBodyExample('https://example.com/sticker.webp');
+
+/**
+ * Request-body examples for the location, contact and poll routes.
+ *
+ * These three had no `@ApiBody` and were left to the schema sampler, which was harmless while every
+ * optional property was self-contained. `quotedMessageId` is not: the sampler emits EVERY property,
+ * so a Try-it body would carry a made-up message id, and the send path refuses an id it cannot
+ * resolve rather than delivering the message unquoted — turning every unedited Execute on these
+ * three routes into an error. Same failure #1068 fixed for the text and media routes, arriving by a
+ * different door, so the same remedy applies: pin an example that is submittable as-is.
+ */
+export const SEND_LOCATION_BODY_EXAMPLES = {
+  minimal: {
+    summary: 'Share a location',
+    value: { chatId: '628123456789@c.us', latitude: -6.2088, longitude: 106.8456, description: 'Jakarta' },
+  },
+};
+export const SEND_CONTACT_BODY_EXAMPLES = {
+  minimal: {
+    summary: 'Share a contact card',
+    value: { chatId: '628123456789@c.us', contactName: 'Alice', contactNumber: '628999888777' },
+  },
+};
+export const SEND_POLL_BODY_EXAMPLES = {
+  minimal: {
+    summary: 'Ask a single-choice poll',
+    value: { chatId: '120363000000000000@g.us', name: 'Where should we meet?', options: ['Park', 'Beach'] },
+  },
+};
 
 export class SendAudioMessageDto extends SendMediaMessageDto {
   @ApiPropertyOptional({
@@ -246,14 +405,11 @@ export class MessageResponseDto {
   @ApiProperty({
     description:
       'The message id, assigned when the gateway accepts the message for sending. A 201 here means the ' +
-      'message was handed to the WhatsApp client — it does NOT confirm delivery. WhatsApp does not reject ' +
-      'an unregistered recipient synchronously, so a message to a number that is not on WhatsApp still ' +
-      'returns 201 with a valid messageId; whether it later delivers, stalls, or is reported as an error ' +
-      'reaches you asynchronously, if at all. To confirm a number is on WhatsApp before ' +
-      'sending, use GET /api/sessions/{sessionId}/contacts/check/{number}; track real delivery via the ' +
-      'message `status` field (sent → delivered → read, or failed if WhatsApp reports an error for it). ' +
-      'A message resting at `sent` is not diagnostic on its own: a registered recipient whose device has ' +
-      'not come online since the send stays at `sent` too.',
+      'message was handed to the WhatsApp session; it does not confirm delivery. Baileys checks phone ' +
+      'destinations without a LID mapping and rejects a number reported as unregistered with 400. An ' +
+      'unanswered lookup returns 503 before sending. Known LIDs skip the number check. Track delivery ' +
+      'through the message status (sent, delivered, read, or failed). A message resting at sent can ' +
+      'also belong to a registered recipient whose device is offline.',
     example: 'true_628123456789@c.us_3EB0123456789',
   })
   messageId!: string;

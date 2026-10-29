@@ -1,4 +1,5 @@
 import { registerUncaughtExceptionMonitor, registerUnhandledRejectionHandler } from './process-error-monitor';
+import { getUnhandledRejections } from '../common/metrics/process-error-metrics';
 
 const EVENT = 'uncaughtExceptionMonitor';
 
@@ -98,9 +99,54 @@ describe('registerUnhandledRejectionHandler', () => {
     expect(String(warns[0][1]?.reason)).toContain('Execution context was destroyed');
   });
 
+  // The SAME #982 listener produces a second shape. When the navigation lands on a page whose
+  // WhatsApp Web bundle has not defined its module registry yet — which is what a build change does
+  // to a warm profile — the pending evaluate throws on `window.require` instead of dying with the
+  // context. Observed live: two of these at the first boot after the pinned WA Web build moved, then
+  // the session reached READY on its own with no lastError, and a restart on the same build produced
+  // none. Same cause, same benign outcome, so it must not read like a crash either.
+  it('treats the window.require variant of the same framenavigated race as the same benign class', () => {
+    const { handler, errors, warns } = register();
+    handler(new TypeError('window.require is not a function'));
+    expect(errors).toHaveLength(0);
+    expect(warns).toHaveLength(1);
+    expect(warns[0][0]).toMatch(/navigation or engine teardown/i);
+    expect(String(warns[0][1]?.reason)).toContain('window.require is not a function');
+  });
+
+  // The downgrade is scoped to that one call, not to `window.require` anywhere: a rejection naming a
+  // DIFFERENT missing global is not this race and must stay an error.
+  it('still errors on an unrelated missing-global rejection', () => {
+    const { handler, errors, warns } = register();
+    handler(new TypeError('window.somethingElse is not a function'));
+    expect(warns).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('counts each rejection under its classification', () => {
+    const { handler } = register();
+    const before = getUnhandledRejections();
+    handler(new Error('something genuinely broke'));
+    handler(new Error('Execution context was destroyed'));
+    handler('a bare string');
+
+    expect(getUnhandledRejections()).toEqual({
+      other: before.other + 2,
+      page_context_lost: before.page_context_lost + 1,
+    });
+  });
+
   it('stringifies a non-Error rejection without throwing', () => {
     const { handler, errors } = register();
     expect(() => handler('a bare string')).not.toThrow();
     expect(errors[0][1]).toContain('a bare string');
+  });
+
+  // String() throws on a null-prototype object; a throw inside this listener would become an uncaught
+  // exception and take the process down, which is exactly what the handler exists to prevent.
+  it('logs a rejection value that String() cannot convert instead of throwing', () => {
+    const { handler, errors } = register();
+    expect(() => handler(Object.create(null))).not.toThrow();
+    expect(errors).toEqual([['Unhandled promise rejection', '[object Object]']]);
   });
 });

@@ -6,8 +6,11 @@ import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.HttpMethod;
 import com.rmyndharis.openwa.model.CreateGroupRequest;
 import com.rmyndharis.openwa.model.GroupDescriptionRequest;
+import com.rmyndharis.openwa.model.GroupMemberLabelRequest;
 import com.rmyndharis.openwa.model.GroupInfo;
 import com.rmyndharis.openwa.model.GroupJoinInfo;
+import com.rmyndharis.openwa.model.GroupMembershipRequest;
+import com.rmyndharis.openwa.model.MembershipRequestActionRequest;
 import com.rmyndharis.openwa.model.GroupSettings;
 import com.rmyndharis.openwa.model.GroupSubjectRequest;
 import com.rmyndharis.openwa.model.GroupSummary;
@@ -18,6 +21,7 @@ import com.rmyndharis.openwa.model.JoinGroupRequest;
 import com.rmyndharis.openwa.model.JoinGroupResponse;
 import com.rmyndharis.openwa.model.ListGroupsQuery;
 import com.rmyndharis.openwa.model.ParticipantsRequest;
+import com.rmyndharis.openwa.model.ParticipantsResult;
 import com.rmyndharis.openwa.model.SuccessResult;
 import java.util.List;
 
@@ -50,50 +54,54 @@ public final class GroupsResource {
             GroupInfo.class);
     }
 
-    /** Create a new group. */
-    public GroupInfo create(String sessionId, CreateGroupRequest body) {
+    /**
+     * Create a group. Baileys only; whatsapp-web.js answers {@code 501}. Answers the group SUMMARY,
+     * not the detail shape {@code get} returns — there is
+     * no participant list, description, owner or creation time on a create response.
+     */
+    public GroupSummary create(String sessionId, CreateGroupRequest body) {
         return client.request(
-            HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/groups", null, body, GroupInfo.class);
+            HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/groups", null, body, GroupSummary.class);
     }
 
     /** Add participants to a group. */
-    public SuccessResult addParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult addParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Remove participants from a group. */
-    public SuccessResult removeParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult removeParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.DELETE,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Promote participants to group admin. */
-    public SuccessResult promoteParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult promoteParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants/promote",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Demote participants from group admin. */
-    public SuccessResult demoteParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult demoteParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants/demote",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Update the group subject (name). */
@@ -142,7 +150,21 @@ public final class GroupsResource {
             SuccessResult.class);
     }
 
-    /** Get the group settings (announce / locked / ephemeral timer). */
+    /**
+     * Set this account's member label in the group (empty string clears it). Baileys only;
+     * whatsapp-web.js answers 501. A 200 means the label message was handed to WhatsApp; it cannot
+     * be read back.
+     */
+    public SuccessResult setMemberLabel(String sessionId, String groupId, String label) {
+        return client.request(
+            HttpMethod.PUT,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/member-label",
+            null,
+            new GroupMemberLabelRequest(label),
+            SuccessResult.class);
+    }
+
+    /** Get the group settings (announce / locked / ephemeral timer / member-add mode). */
     public GroupSettings getGroupSettings(String sessionId, String groupId) {
         return client.request(
             HttpMethod.GET,
@@ -224,4 +246,49 @@ public final class GroupsResource {
             null,
             InviteCodeResponse.class);
     }
+
+    /**
+     * List a group's pending join requests. Requires the account to be a group admin.
+     *
+     * <p>Only {@code participantId} is guaranteed on each entry — the engine reports the rest when
+     * it has it.
+     */
+    public List<GroupMembershipRequest> getMembershipRequests(String sessionId, String groupId) {
+        return client.requestList(
+            HttpMethod.GET,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/membership-requests",
+            null,
+            null,
+            GroupMembershipRequest.class);
+    }
+
+    /**
+     * Approve pending join requests. A body with no participants approves every pending request.
+     *
+     * <p>A partial refusal answers 200 and reports it per participant in {@code results}, so
+     * {@code success} alone does not mean everyone was let in.
+     */
+    public ParticipantsResult approveMembershipRequests(
+            String sessionId, String groupId, MembershipRequestActionRequest body) {
+        return client.request(
+            HttpMethod.POST,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId)
+                + "/membership-requests/approve",
+            null,
+            body,
+            ParticipantsResult.class);
+    }
+
+    /** Reject pending join requests. A body with no participants rejects every pending request. */
+    public ParticipantsResult rejectMembershipRequests(
+            String sessionId, String groupId, MembershipRequestActionRequest body) {
+        return client.request(
+            HttpMethod.POST,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId)
+                + "/membership-requests/reject",
+            null,
+            body,
+            ParticipantsResult.class);
+    }
+
 }

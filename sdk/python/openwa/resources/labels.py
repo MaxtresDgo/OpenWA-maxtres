@@ -7,7 +7,7 @@ feature; the session must be a business account.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
 from .._http import quote_segment
 from ..types import AddLabelRequest, ChatSummary, LabelRecord, SuccessResult, UpsertLabelRequest
@@ -20,13 +20,15 @@ class LabelsResource:
     def __init__(self, http: "HttpExecutor") -> None:
         self._http = http
 
-    def list(self, session_id: str) -> list[LabelRecord]:
+    def list(self, session_id: str) -> List[LabelRecord]:
+        """List all labels available in the business account. whatsapp-web.js only; Baileys answers 501."""
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/labels")
 
     def get(self, session_id: str, label_id: str) -> LabelRecord:
+        """Get a single label by id. whatsapp-web.js only; Baileys answers 501."""
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/labels/{quote_segment(label_id)}")
 
-    def chats(self, session_id: str, label_id: str) -> list[ChatSummary]:
+    def chats(self, session_id: str, label_id: str) -> List[ChatSummary]:
         """Every chat carrying a label.
 
         whatsapp-web.js only -- Baileys has label writes but no label query of any kind, and
@@ -41,8 +43,8 @@ class LabelsResource:
 
         PUT rather than POST because you choose the id: WhatsApp carries one write keyed on it, so
         whether this creates or updates depends purely on whether that id already exists. Pick an
-        unused id to create -- reusing one rewrites that label rather than failing. Omitted fields
-        are left alone.
+        unused id to create -- reusing one rewrites that label rather than failing. The write
+        replaces the whole label, so an omitted field is not preserved.
         """
         return self._http.request(
             "PUT", f"/api/sessions/{quote_segment(session_id)}/labels/{quote_segment(label_id)}", body=body
@@ -54,7 +56,8 @@ class LabelsResource:
             "DELETE", f"/api/sessions/{quote_segment(session_id)}/labels/{quote_segment(label_id)}"
         )
 
-    def for_chat(self, session_id: str, chat_id: str) -> list[LabelRecord]:
+    def for_chat(self, session_id: str, chat_id: str) -> List[LabelRecord]:
+        """Get the labels currently applied to a chat. whatsapp-web.js only; Baileys answers 501."""
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/labels/chat/{quote_segment(chat_id)}")
 
     def add_to_chat(self, session_id: str, chat_id: str, body: AddLabelRequest) -> SuccessResult:

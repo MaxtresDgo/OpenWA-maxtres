@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { OpenWAClient } from '../src';
+import type { WebhookFilters } from '../src/types';
 import { MockTransport } from './helpers';
 
 function client(t: MockTransport): OpenWAClient {
@@ -58,6 +59,37 @@ describe('GroupsResource — exact paths and bodies', () => {
     expect(t.lastCall!.url).toContain('/invite-code/revoke');
   });
 
+  it('setMemberLabel PUTs the label to the group', async () => {
+    const t = new MockTransport().on('PUT', /\/member-label$/, { body: { success: true } });
+    await client(t).groups.setMemberLabel('s', 'g@g.us', 'Site A');
+    expect(t.lastCall!.method).toBe('PUT');
+    expect(t.lastCall!.url).toContain('/api/sessions/s/groups/g@g.us/member-label');
+    expect(t.lastCall!.body).toEqual({ label: 'Site A' });
+  });
+
+  it('membership requests — list, approve, reject', async () => {
+    const t = new MockTransport()
+      .on('GET', /\/membership-requests$/, { body: [{ participantId: 'a@c.us', method: 'invite_link' }] })
+      .on('POST', /\/membership-requests\/approve$/, { body: { success: true, message: 'ok', results: [] } })
+      .on('POST', /\/membership-requests\/reject$/, { body: { success: true, message: 'ok', results: [] } });
+    const c = client(t);
+
+    const pending = await c.groups.getMembershipRequests('s', 'g1@g.us');
+    expect(t.lastCall!.method).toBe('GET');
+    expect(t.lastCall!.url).toContain('/groups/g1@g.us/membership-requests');
+    expect(pending[0].participantId).toBe('a@c.us');
+
+    await c.groups.approveMembershipRequests('s', 'g1@g.us', ['a@c.us']);
+    expect(t.lastCall!.url).toContain('/membership-requests/approve');
+    expect(t.lastCall!.body).toEqual({ participants: ['a@c.us'] });
+
+    // Omitting the list means "every pending request" — it must send an empty object, not
+    // `{ participants: undefined }`, which would read as an explicit empty selection.
+    await c.groups.rejectMembershipRequests('s', 'g1@g.us');
+    expect(t.lastCall!.url).toContain('/membership-requests/reject');
+    expect(t.lastCall!.body).toEqual({});
+  });
+
   it('joinGroup posts the invite code to /groups/join', async () => {
     const t = new MockTransport().on('POST', /\/groups\/join$/, { body: { success: true, groupId: 'g1@g.us' } });
     const res = await client(t).groups.joinGroup('s', { inviteCode: 'AbCdEf' });
@@ -103,6 +135,13 @@ describe('ProfileResource — exact paths and bodies', () => {
     const t = new MockTransport().on('PUT', /\/profile\/picture$/, { body: { success: true } });
     await client(t).profile.setProfilePicture('s', { base64: 'aGVsbG8=', mimetype: 'image/png' });
     expect(t.lastCall!.body).toEqual({ base64: 'aGVsbG8=', mimetype: 'image/png' });
+  });
+  it('deleteProfilePicture sends DELETE to the picture route with no body', async () => {
+    const t = new MockTransport().on('DELETE', /\/profile\/picture$/, { body: { success: true } });
+    await client(t).profile.deleteProfilePicture('s');
+    expect(t.lastCall!.method).toBe('DELETE');
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/profile/picture');
+    expect(t.lastCall!.body).toBeUndefined();
   });
 });
 
@@ -173,6 +212,17 @@ describe('ContactsResource — exact paths', () => {
     expect(t.lastCall!.method).toBe('DELETE');
   });
 
+  it('listBlocked — GET the session-wide blocked list, no contact id and no body', async () => {
+    const t = new MockTransport().on('GET', /\/contacts\/blocked$/, { body: ['a@c.us', 'b@c.us'] });
+    const res = await client(t).contacts.listBlocked('s');
+
+    expect(t.lastCall!.method).toBe('GET');
+    // Session-wide: no contact id in the path, and not the /contacts list route either.
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/contacts/blocked');
+    expect(t.lastCall!.body).toBeUndefined();
+    expect(res).toEqual(['a@c.us', 'b@c.us']);
+  });
+
   it('profilePictures batch-resolves ids via the ids query param', async () => {
     const t = new MockTransport().on('GET', /\/contacts\/profile-pictures$/, {
       body: { pictures: { 'a@c.us': 'http://p/a', 'b@c.us': null } },
@@ -192,7 +242,17 @@ describe('WebhooksResource — exact paths', () => {
         body: { id: 'w1', sessionId: 's', url: 'u', events: ['*'], active: true, createdAt: '', updatedAt: '' },
       })
       .on('POST', /\/webhooks$/, {
-        body: { id: 'w1', sessionId: 's', url: 'u', events: ['*'], active: true, retryCount: 5, lastTriggeredAt: null, createdAt: '', updatedAt: '' },
+        body: {
+          id: 'w1',
+          sessionId: 's',
+          url: 'u',
+          events: ['*'],
+          active: true,
+          retryCount: 5,
+          lastTriggeredAt: null,
+          createdAt: '',
+          updatedAt: '',
+        },
       })
       .on('PUT', /\/webhooks\/w1$/, {
         body: { id: 'w1', sessionId: 's', url: 'u', events: ['*'], active: false, createdAt: '', updatedAt: '' },
@@ -219,7 +279,7 @@ describe('WebhooksResource — exact paths', () => {
     const t = new MockTransport().on('POST', /\/webhooks$/, {
       body: { id: 'w1', sessionId: 's', url: 'u', events: ['*'], active: true, createdAt: '', updatedAt: '' },
     });
-    const filters = {
+    const filters: WebhookFilters = {
       conditions: [
         { field: 'sender', operator: 'is', value: ['123@c.us'] },
         { field: 'body', operator: 'contains', value: 'invoice', caseSensitive: true },
@@ -229,13 +289,36 @@ describe('WebhooksResource — exact paths', () => {
     await client(t).webhooks.create('s', { url: 'u', events: ['message.received'], filters });
     expect(t.lastCall!.body).toEqual({ url: 'u', events: ['message.received'], filters });
   });
+
+  it('redriveDeliveryFailures POSTs the filter (or an empty body) to the redrive route', async () => {
+    const result = { redriven: 1, delivered: 1, enqueued: 0, failed: 0, skipped: 0, remaining: 0 };
+    const t = new MockTransport().on('POST', /\/api\/webhooks\/delivery-failures\/redrive$/, { body: result });
+    const c = client(t);
+    await expect(c.webhooks.redriveDeliveryFailures({ sessionId: 's', limit: 10 })).resolves.toEqual(result);
+    expect(t.lastCall!.body).toEqual({ sessionId: 's', limit: 10 });
+    await c.webhooks.redriveDeliveryFailures();
+    expect(t.lastCall!.body).toEqual({});
+  });
+
+  // The gateway reads `ids: []` as "replay nothing" and an omitted `ids` as "replay up to 100 rows", so
+  // an SDK that drops the empty array would turn a deliberate empty selection into a real replay.
+  it('redriveDeliveryFailures keeps an explicit empty ids list', async () => {
+    const result = { redriven: 0, delivered: 0, enqueued: 0, failed: 0, skipped: 0, remaining: 3 };
+    const t = new MockTransport().on('POST', /\/api\/webhooks\/delivery-failures\/redrive$/, { body: result });
+    await client(t).webhooks.redriveDeliveryFailures({ ids: [] });
+    expect(t.lastCall!.body).toEqual({ ids: [] });
+  });
 });
 
 describe('StatusResource — nested media bodies', () => {
   it('sendImage/sendVideo forward the server-required nested {image|video:{...}} shape', async () => {
     const t = new MockTransport()
-      .on('POST', /\/status\/send-image$/, { body: { statusId: 's1', timestamp: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-02T00:00:00.000Z' } })
-      .on('POST', /\/status\/send-video$/, { body: { statusId: 's2', timestamp: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-02T00:00:00.000Z' } });
+      .on('POST', /\/status\/send-image$/, {
+        body: { statusId: 's1', timestamp: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-02T00:00:00.000Z' },
+      })
+      .on('POST', /\/status\/send-video$/, {
+        body: { statusId: 's2', timestamp: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-02T00:00:00.000Z' },
+      });
     const c = client(t);
     await c.status.sendImage('s', { image: { url: 'http://img' }, recipients: ['a@c.us'], caption: 'hi' });
     expect(t.lastCall!.body).toEqual({ image: { url: 'http://img' }, recipients: ['a@c.us'], caption: 'hi' });
@@ -317,6 +400,17 @@ describe('ChatsResource — exact paths', () => {
   });
 });
 
+describe('ChatsResource last-message metadata', () => {
+  it('keeps media types and omitted metadata from the server response', async () => {
+    const t = new MockTransport().on('GET', /\/chats$/, {
+      body: [{ id: 'photo@c.us', lastMessageType: 'image' }, { id: 'empty@c.us' }],
+    });
+    const chats = await client(t).chats.list('s');
+    expect(chats[0].lastMessageType).toBe('image');
+    expect(chats[1].lastMessageType).toBeUndefined();
+  });
+});
+
 describe('ChatsResource.clearMessages', () => {
   it('DELETEs the chat messages sub-resource', async () => {
     const t = new MockTransport().on('DELETE', /\/chats\/.+\/messages$/, { body: { success: true } });
@@ -366,21 +460,69 @@ describe('ChatsResource.archive', () => {
   });
 });
 
+describe('ChatsResource.pin', () => {
+  it('posts chatId and the pin flag', async () => {
+    const t = new MockTransport().on('POST', /\/chats\/pin$/, { body: { success: true } });
+    await client(t).chats.pin('s', { chatId: 'a@c.us', pin: true });
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/chats/pin');
+    expect(t.lastCall!.body).toEqual({ chatId: 'a@c.us', pin: true });
+  });
+
+  it('reports the three-pin refusal rather than throwing', async () => {
+    const t = new MockTransport().on('POST', /\/chats\/pin$/, { body: { success: false } });
+    await expect(client(t).chats.pin('s', { chatId: 'a@c.us', pin: true })).resolves.toEqual({ success: false });
+  });
+});
+
+describe('ChatsResource.mute', () => {
+  // muteUntil must survive as the exact epoch-millisecond number given. A client that divided by
+  // 1000, or stringified it, would still get a 200 back — the wrong unit is only visible here.
+  it('sends muteUntil as epoch milliseconds, unchanged', async () => {
+    const t = new MockTransport().on('POST', /\/chats\/mute$/, { body: { success: true } });
+    await client(t).chats.mute('s', { chatId: 'a@c.us', muteUntil: 1893456000000 });
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/chats/mute');
+    expect(t.lastCall!.body).toEqual({ chatId: 'a@c.us', muteUntil: 1893456000000 });
+  });
+
+  // null is the unmute signal and is NOT the same as omitting the field, which the route rejects.
+  it('sends an explicit null to unmute rather than dropping the key', async () => {
+    const t = new MockTransport().on('POST', /\/chats\/mute$/, { body: { success: true } });
+    await client(t).chats.mute('s', { chatId: 'a@c.us', muteUntil: null });
+    expect(t.lastCall!.body).toEqual({ chatId: 'a@c.us', muteUntil: null });
+    expect(Object.keys(t.lastCall!.body as object)).toContain('muteUntil');
+  });
+});
+
 describe('HealthResource + auth — exact paths', () => {
   it('health/live/ready and auth validate', async () => {
     const t = new MockTransport()
       .on('GET', /\/health$/, { body: { status: 'ok', version: '0.7.2' } })
       .on('GET', /\/health\/live$/, { body: { status: 'ok' } })
       .on('GET', /\/health\/ready$/, { body: { status: 'ok', details: {} } })
-      .on('POST', /\/auth\/validate$/, { body: { valid: true, role: 'admin' } });
+      .on('POST', /\/auth\/validate$/, { body: { valid: true, role: 'admin', scoped: true } });
     const c = client(t);
     await c.health.check();
     expect(t.lastCall!.url).toBe('http://x/api/health');
     await c.health.live();
     await c.health.ready();
-    await c.auth();
+    expect((await c.auth()).scoped).toBe(true);
     expect(t.lastCall!.method).toBe('POST');
     expect(t.lastCall!.url).toBe('http://x/api/auth/validate');
+  });
+});
+
+describe('CallsResource — call link', () => {
+  it('createLink posts to /calls/link with the type and start time', async () => {
+    const t = new MockTransport().on('POST', /\/calls\/link$/, {
+      body: { link: 'https://call.whatsapp.com/video/AbC' },
+    });
+    const res = await client(t).calls.createLink('s', { type: 'video', startTime: 1800000000000 });
+
+    expect(t.lastCall!.method).toBe('POST');
+    // Session-wide: no call id in the path, and not the reject route.
+    expect(t.lastCall!.url).toBe('http://x/api/sessions/s/calls/link');
+    expect(t.lastCall!.body).toEqual({ type: 'video', startTime: 1800000000000 });
+    expect(res.link).toContain('call.whatsapp.com');
   });
 });
 
@@ -404,5 +546,75 @@ describe('SearchResource — exact path and query forwarding', () => {
     const c = client(t);
     await c.search.search({ q: 'term', chatId: '628@c.us', direction: 'incoming' });
     expect(t.lastCall!.url).toBe('http://x/api/search?q=term&chatId=628%40c.us&direction=incoming');
+  });
+
+  it('forwards the match mode', async () => {
+    const t = new MockTransport().on('GET', /\/search$/, {
+      body: { hits: [], total: 0, tookMs: 1, provider: 'builtin-fts' },
+    });
+    await client(t).search.search({ q: 'voic', match: 'contains' });
+    expect(t.lastCall!.url).toBe('http://x/api/search?q=voic&match=contains');
+  });
+});
+
+// Eleven routes no other test calls. Each row is written from the contract (openapi.json: verb, path,
+// query and request-body keys), not read off the client, so a changed verb or a renamed body key fails here.
+describe('routes with no other test: verb, path, query and body', () => {
+  type Row = [name: string, call: (c: OpenWAClient) => Promise<unknown>, method: string, url: string, body?: unknown];
+  const rows: Row[] = [
+    ['sessions.getConfig', c => c.sessions.getConfig('s1'), 'GET', 'http://x/api/sessions/s1/config'],
+    [
+      'sessions.updateConfig',
+      c =>
+        c.sessions.updateConfig('s1', { autoRejectCalls: true, maxReconnectAttempts: null, reconnectBaseDelay: 2000 }),
+      'PATCH',
+      'http://x/api/sessions/s1/config',
+      { autoRejectCalls: true, maxReconnectAttempts: null, reconnectBaseDelay: 2000 },
+    ],
+    ['sessions.getProxy', c => c.sessions.getProxy('s1'), 'GET', 'http://x/api/sessions/s1/proxy'],
+    [
+      'sessions.updateProxy',
+      c => c.sessions.updateProxy('s1', { proxyUrl: null }),
+      'PATCH',
+      'http://x/api/sessions/s1/proxy',
+      { proxyUrl: null },
+    ],
+    [
+      'webhooks.listAll',
+      c => c.webhooks.listAll({ limit: 5, offset: 10 }),
+      'GET',
+      'http://x/api/webhooks?limit=5&offset=10',
+    ],
+    [
+      'webhooks.deliveryFailures',
+      c => c.webhooks.deliveryFailures({ sessionId: 's1', limit: 5, offset: 10 }),
+      'GET',
+      'http://x/api/webhooks/delivery-failures?sessionId=s1&limit=5&offset=10',
+    ],
+    [
+      'chats.subscribePresence',
+      c => c.chats.subscribePresence('s1', { chatId: 'a@c.us' }),
+      'POST',
+      'http://x/api/sessions/s1/presence/subscribe',
+      { chatId: 'a@c.us' },
+    ],
+    ['chats.getPresence', c => c.chats.getPresence('s1', 'a@c.us'), 'GET', 'http://x/api/sessions/s1/presence/a@c.us'],
+    ['status.fromContact', c => c.status.fromContact('s1', 'a@c.us'), 'GET', 'http://x/api/sessions/s1/status/a@c.us'],
+    ['labels.chats', c => c.labels.chats('s1', 'l1'), 'GET', 'http://x/api/sessions/s1/labels/l1/chats'],
+    [
+      'groups.joinInfo',
+      c => c.groups.joinInfo('s1', 'INVITE'),
+      'GET',
+      'http://x/api/sessions/s1/groups/join-info?code=INVITE',
+    ],
+  ];
+
+  it.each(rows)('%s', async (_name, call, method, url, body) => {
+    const t = new MockTransport().passthrough({ status: 200, body: {} });
+    await call(client(t));
+    expect(t.calls).toHaveLength(1);
+    expect(t.lastCall!.method).toBe(method);
+    expect(t.lastCall!.url).toBe(url);
+    expect(t.lastCall!.body).toEqual(body);
   });
 });

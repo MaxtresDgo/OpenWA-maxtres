@@ -1,5 +1,6 @@
-import { Controller, Get, Put, NotImplementedException } from '@nestjs/common';
+import { Controller, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { SettingsResponseDto } from './dto/settings-response.dto';
 import { ConfigService } from '@nestjs/config';
 import { RequireRole, RequireUnscopedKey } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
@@ -38,7 +39,8 @@ export class SettingsController {
         // use), not a hardcoded localhost guess that ignores the operator's configured host.
         apiBaseUrl: process.env.BASE_URL || `http://localhost:${port}`,
         // The engine auto-reconnects on a transient disconnect by default (there is no global off
-        // switch; reconnection is bounded per-session by RECONNECT_MAX_ATTEMPTS). Reporting a hardcoded
+        // switch; attempts are unlimited unless a session sets config.maxReconnectAttempts, which on
+        // Baileys bounds only the reconnect after a logged-out close, not a transient drop). Reporting a hardcoded
         // `false` for a non-existent `engine.autoReconnect` key was actively misleading.
         autoReconnect: true,
         debugMode: this.configService.get<boolean>('database.logging', false),
@@ -50,10 +52,11 @@ export class SettingsController {
         // — otherwise the panel reports docs enabled in production where they are actually disabled.
         enableDocs: isSwaggerEnabled(process.env.ENABLE_SWAGGER, process.env.NODE_ENV),
       },
+      // Fixed placeholders: no notification feature exists, so nothing here may report one as on.
       notifications: {
         emailEnabled: false,
         notificationEmail: '',
-        webhookAlerts: true,
+        webhookAlerts: false,
       },
     };
   }
@@ -62,32 +65,12 @@ export class SettingsController {
   @RequireRole(ApiKeyRole.ADMIN)
   @RequireUnscopedKey()
   @ApiOperation({ summary: 'Get application settings' })
-  @ApiResponse({ status: 200, description: 'Current settings' })
+  @ApiResponse({ status: 200, description: 'Current settings', type: SettingsResponseDto })
   get(): Settings {
     // Settings expose environment-derived configuration (debug flag, reconnect policy, rate-limit
     // thresholds, base URL) that describes the deployment rather than any one session. Gate the read
     // at ADMIN and require an unrestricted key: the role check alone does not exclude a key confined
     // to specific sessions, which has no claim on deployment-wide configuration.
     return this.settings;
-  }
-
-  @Put()
-  @RequireRole(ApiKeyRole.ADMIN)
-  @RequireUnscopedKey()
-  @ApiOperation({ summary: 'Settings are read-only at runtime (environment-derived)' })
-  @ApiResponse({
-    status: 501,
-    description: 'Settings are derived from environment configuration and cannot be changed at runtime',
-  })
-  update(): never {
-    // Every Settings field is derived from environment variables and consumed at boot /
-    // decorator-evaluation time (ThrottlerModule.forRootAsync, port, webhook timeout, DB logging),
-    // and ConfigService is immutable at runtime — so a runtime write cannot actually take effect.
-    // The previous handler mutated an in-memory copy and returned 200 'updated' while persisting
-    // nothing and applying nothing: a false success. Be honest instead of pretending it worked.
-    throw new NotImplementedException(
-      'Settings are derived from environment configuration and are read-only at runtime. ' +
-        'Change the corresponding environment variable and restart the service.',
-    );
   }
 }

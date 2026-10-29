@@ -1,11 +1,14 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsNotEmpty, IsString, Matches } from 'class-validator';
+import { ToStrictString } from '../../../common/utils/strict-boolean';
 
 export class RequestPairingCodeDto {
   @ApiProperty({
     description: 'Phone number to link, digits only in international format (country code + number).',
     example: '628123456789',
+    pattern: '^[0-9]{6,15}$',
   })
+  @ToStrictString()
   @IsString()
   @IsNotEmpty()
   // Digits only (no +, spaces, or dashes); 6–15 digits covers E.164.

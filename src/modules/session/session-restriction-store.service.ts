@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import type { AccountRestriction } from '../../engine/interfaces/whatsapp-engine.interface';
-import { setRestrictedSessionCount } from '../../common/metrics/session-restriction-metrics';
+import {
+  setRestrictedSessionCount,
+  registerRestrictedSessionRecount,
+} from '../../common/metrics/session-restriction-metrics';
 import { Session } from './entities/session.entity';
 
 /**
@@ -20,6 +23,13 @@ import { Session } from './entities/session.entity';
 export class SessionRestrictionStore {
   private readonly restrictions = new Map<string, AccountRestriction>();
 
+  constructor() {
+    // The mirrored gauge is refreshed on every mutation, but an expiry is not a mutation: a timelock
+    // that lapses on its own left the gauge claiming a session was restricted while get/size/attachTo
+    // all reported it was not. Registering the recount makes the gauge read what the API would say.
+    registerRestrictedSessionRecount(() => this.size());
+  }
+
   /**
    * Record a restriction the engine reported.
    *
@@ -29,10 +39,14 @@ export class SessionRestrictionStore {
    * connect, so an un-deduped webhook would fire on a loop for one unchanged fact.
    *
    * The stored entry is refreshed either way, so a re-report with a later `expiresAt` updates what
-   * the API serves without being announced as a new restriction.
+   * the API serves without being announced as a new restriction. Compared against what is in force:
+   * a same-cause restriction imposed after the last one lapsed is a new onset, not a re-report. A
+   * report that is itself already over is compared against the stored entry, so a clock running
+   * ahead of WhatsApp's does not announce the same lapsed timelock on every connect.
    */
   set(sessionId: string, restriction: AccountRestriction): boolean {
-    const previous = this.restrictions.get(sessionId);
+    const lapsed = restriction.expiresAt != null && restriction.expiresAt <= Date.now();
+    const previous = lapsed ? this.restrictions.get(sessionId) : this.inForce(sessionId);
     this.restrictions.set(sessionId, restriction);
     this.publishCount();
     return previous?.kind !== restriction.kind || previous?.code !== restriction.code;
@@ -44,11 +58,7 @@ export class SessionRestrictionStore {
    * read says it is not.
    */
   private publishCount(): void {
-    let inForce = 0;
-    for (const sessionId of this.restrictions.keys()) {
-      if (this.inForce(sessionId)) inForce++;
-    }
-    setRestrictedSessionCount(inForce);
+    setRestrictedSessionCount(this.size());
   }
 
   /** The restriction in force, if any. `attachTo` is the projection; this is the raw read. */

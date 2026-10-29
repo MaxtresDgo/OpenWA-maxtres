@@ -6,7 +6,7 @@ Backed by ``src/modules/channel/channel.controller.ts``
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 from .._http import quote_segment
 from ..types import (
@@ -17,6 +17,8 @@ from ..types import (
     ChannelRecord,
     SubscribeChannelRequest,
     SuccessResult,
+    DemoteChannelAdminRequest,
+    TransferChannelOwnershipRequest,
 )
 
 if TYPE_CHECKING:
@@ -28,6 +30,7 @@ class ChannelsResource:
         self._http = http
 
     def list(self, session_id: str) -> list[ChannelRecord]:
+        """List the channels the session is subscribed to. whatsapp-web.js only; Baileys answers 501."""
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/channels")
 
     def get(self, session_id: str, channel_id: str) -> ChannelRecord:
@@ -35,7 +38,8 @@ class ChannelsResource:
 
     def messages(
         self, session_id: str, channel_id: str, query: ChannelMessageQuery | None = None
-    ) -> list[ChannelMessageRecord]:
+    ) -> List[ChannelMessageRecord]:
+        """Get recent messages from a channel. whatsapp-web.js only; Baileys answers 501."""
         return self._http.request(
             "GET", f"/api/sessions/{quote_segment(session_id)}/channels/{quote_segment(channel_id)}/messages", query=query
         )
@@ -61,9 +65,38 @@ class ChannelsResource:
         )
 
     def subscribe(self, session_id: str, body: SubscribeChannelRequest) -> ChannelRecord:
-        """Subscribe to a channel using its invite code. Requires an OPERATOR-level key."""
+        """Subscribe to a channel using its invite code. Requires an OPERATOR-level key.
+
+        Baileys only; whatsapp-web.js answers 501.
+        """
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/channels/subscribe", body=body)
 
     def unsubscribe(self, session_id: str, channel_id: str) -> SuccessResult:
         """Unsubscribe from a channel. Requires an OPERATOR-level key."""
         return self._http.request("DELETE", f"/api/sessions/{quote_segment(session_id)}/channels/{quote_segment(channel_id)}")
+
+    def demote_admin(self, session_id: str, channel_id: str, body: DemoteChannelAdminRequest) -> SuccessResult:
+        """Demote a channel admin back to a subscriber. Requires an OPERATOR-level key.
+
+        There is no promote counterpart: neither engine library has one, so an admin is promoted
+        from the WhatsApp app and demoted here. The whatsapp-web.js engine answers 501.
+        """
+        return self._http.request(
+            "POST",
+            f"/api/sessions/{quote_segment(session_id)}/channels/{quote_segment(channel_id)}/admins/demote",
+            body=body,
+        )
+
+    def transfer_ownership(
+        self, session_id: str, channel_id: str, body: TransferChannelOwnershipRequest
+    ) -> SuccessResult:
+        """Hand a channel to a new owner. Requires an OPERATOR-level key.
+
+        **Irreversible**: once the transfer lands this account stops being the owner and cannot take
+        the channel back. The whatsapp-web.js engine answers 501.
+        """
+        return self._http.request(
+            "POST",
+            f"/api/sessions/{quote_segment(session_id)}/channels/{quote_segment(channel_id)}/owner/transfer",
+            body=body,
+        )

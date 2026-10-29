@@ -1,17 +1,21 @@
 {
     "name": "@rmyndharis/openwa",
-    "version": "0.2.0",
-    "description": "Official JavaScript/TypeScript SDK for OpenWA WhatsApp API Gateway",
+    "version": "0.7.0",
+    "description": "Official JavaScript/TypeScript SDK for OpenWA, the open-source WhatsApp API Gateway (not affiliated with WhatsApp or Meta)",
     "type": "module",
     "main": "./dist/cjs/index.js",
     "module": "./dist/esm/index.js",
-    "types": "./dist/esm/index.d.ts",
+    "types": "./dist/cjs/index.d.ts",
     "exports": {
         ".": {
-            "types": "./dist/esm/index.d.ts",
-            "import": "./dist/esm/index.js",
-            "require": "./dist/cjs/index.js",
-            "default": "./dist/esm/index.js"
+            "import": {
+                "types": "./dist/esm/index.d.ts",
+                "default": "./dist/esm/index.js"
+            },
+            "require": {
+                "types": "./dist/cjs/index.d.ts",
+                "default": "./dist/cjs/index.js"
+            }
         }
     },
     "files": [
@@ -47,7 +51,7 @@
     "sideEffects": false,
     "peerDependencies": {},
     "devDependencies": {
-        "typescript": "^5.7.3",
-        "vitest": "^2.1.0"
+        "typescript": "^7.0.2",
+        "vitest": "^5.0.3"
     }
 }

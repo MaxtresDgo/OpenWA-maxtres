@@ -12,8 +12,12 @@ Example usage::
         api_key="owa_k1_…",
     )
 
-    client.sessions.start("my-session")
-    result = client.messages.send_text("my-session", {
+    # Sessions are addressed by the UUID that create() returns, not by name.
+    session = client.sessions.create({"name": "my-session"})
+    client.sessions.start(session["id"])
+    # Link the account before sending: scan sessions.get_qr_code (or use sessions.request_pairing_code for a number with no linked session),
+    # then wait for status "ready". An unlinked session answers the send with 409.
+    result = client.messages.send_text(session["id"], {
         "chatId": "628123456789@c.us",
         "text": "Hello from the OpenWA Python SDK!",
     })
@@ -31,9 +35,11 @@ from .errors import (
     OpenWAForbiddenError,
     OpenWANotFoundError,
     OpenWANotImplementedError,
+    OpenWAServiceUnavailableError,
     OpenWARateLimitError,
     OpenWATimeoutError,
 )
+from .webhook import verify_webhook_signature
 
 __all__ = [
     "OpenWAClient",
@@ -45,5 +51,7 @@ __all__ = [
     "OpenWAConflictError",
     "OpenWARateLimitError",
     "OpenWANotImplementedError",
+    "OpenWAServiceUnavailableError",
     "OpenWATimeoutError",
+    "verify_webhook_signature",
 ]

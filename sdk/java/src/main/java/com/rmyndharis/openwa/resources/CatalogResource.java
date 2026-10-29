@@ -7,17 +7,16 @@ import com.rmyndharis.openwa.http.HttpMethod;
 import com.rmyndharis.openwa.model.CatalogInfo;
 import com.rmyndharis.openwa.model.CatalogProduct;
 import com.rmyndharis.openwa.model.CatalogProductsQuery;
-import com.rmyndharis.openwa.model.MessageResponse;
 import com.rmyndharis.openwa.model.PaginatedProducts;
-import com.rmyndharis.openwa.model.SendCatalogRequest;
+import com.rmyndharis.openwa.model.ProductMessageResponse;
 import com.rmyndharis.openwa.model.SendProductRequest;
 
 /**
- * Catalog resource — WhatsApp Business catalog, products, and product/catalog sends.
+ * Catalog resource — WhatsApp Business catalog, products, and product sends.
  *
  * <p>The catalog controller is mounted under the session root, so catalog reads are
- * {@code /catalog...} while product/catalog SENDS share the messages namespace
- * ({@code /messages/send-product}, {@code /messages/send-catalog}). Write operations
+ * {@code /catalog...} while product sends share the messages namespace
+ * ({@code /messages/send-product}). Write operations
  * require an OPERATOR-level key.
  */
 public final class CatalogResource {
@@ -27,13 +26,19 @@ public final class CatalogResource {
         this.client = client;
     }
 
-    /** Get the business catalog info. */
+    /**
+     * Get the business catalog info, or {@code null} when the account has no catalog. Baileys only;
+     * whatsapp-web.js answers {@code 501}.
+     */
     public CatalogInfo info(String sessionId) {
         return client.request(
             HttpMethod.GET, "/api/sessions/" + encodeSegment(sessionId) + "/catalog", null, null, CatalogInfo.class);
     }
 
-    /** List catalog products. Returns a {@code { products, pagination }} page. */
+    /**
+     * List catalog products. Returns a {@code { products, pagination }} page. Baileys only;
+     * whatsapp-web.js answers {@code 501}.
+     */
     public PaginatedProducts products(String sessionId, CatalogProductsQuery query) {
         return client.request(
             HttpMethod.GET,
@@ -43,7 +48,10 @@ public final class CatalogResource {
             PaginatedProducts.class);
     }
 
-    /** Get a single product by id. */
+    /**
+     * Get a single product by id, or {@code null} when no product in the catalog carries that id.
+     * Baileys only; whatsapp-web.js answers {@code 501}.
+     */
     public CatalogProduct product(String sessionId, String productId) {
         return client.request(
             HttpMethod.GET,
@@ -53,23 +61,16 @@ public final class CatalogResource {
             CatalogProduct.class);
     }
 
-    /** Send a product message. Requires an OPERATOR-level key. Shares the messages path. */
-    public MessageResponse sendProduct(String sessionId, SendProductRequest body) {
+    /**
+     * Send a product message. Requires an OPERATOR-level key. Shares the messages path. Baileys only;
+     * whatsapp-web.js answers {@code 501}.
+     */
+    public ProductMessageResponse sendProduct(String sessionId, SendProductRequest body) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-product",
             null,
             body,
-            MessageResponse.class);
-    }
-
-    /** Send a catalog link message. Requires an OPERATOR-level key. Shares the messages path. */
-    public MessageResponse sendCatalog(String sessionId, SendCatalogRequest body) {
-        return client.request(
-            HttpMethod.POST,
-            "/api/sessions/" + encodeSegment(sessionId) + "/messages/send-catalog",
-            null,
-            body,
-            MessageResponse.class);
+            ProductMessageResponse.class);
     }
 }

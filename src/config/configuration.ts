@@ -2,7 +2,11 @@ import * as path from 'path';
 import { computeFeatureFlags } from './feature-flags';
 import { computeSendPacingConfig } from '../modules/message/send-pacing.config';
 import { resolveInflightBodyBudgetBytes } from './inflight-body-budget';
+import { resolveRequestTimeoutMs } from './http-timeouts';
 import { readWsRateLimitConfig } from '../modules/events/ws-rate-limit';
+import { DEFAULT_WEBHOOK_SHUTDOWN_DRAIN_MS, MAX_TIMER_MS } from '../common/services/shutdown-budget';
+import { parseTrustedProxies } from '../common/utils/ip';
+import { positiveIntFromEnv } from '../common/utils/env-int';
 
 /**
  * Root of the host's persistent state. Relative on purpose: the image sets WORKDIR /app and mounts
@@ -14,10 +18,16 @@ import { readWsRateLimitConfig } from '../modules/events/ws-rate-limit';
  * from an unrelated string. Deriving both from one value is what keeps a plugin's code and its
  * registry entry in the same tree.
  *
- * Deliberately NOT env-overridable: every other data path (DATABASE_NAME, MAIN_DATABASE_NAME,
+ * There is deliberately no DATA_DIR knob: every other data path (DATABASE_NAME, MAIN_DATABASE_NAME,
  * SESSION_DATA_PATH, BAILEYS_AUTH_DIR, STORAGE_LOCAL_PATH) carries its own override and none of them
- * would follow a DATA_DIR knob, so such a knob would move part of the state while looking like it
- * moved all of it.
+ * would follow it, so a knob by that name would move part of the state while looking like it moved
+ * all of it.
+ *
+ * PLUGIN_STATE_DIR is that objection answered rather than repeated: this value reaches exactly one
+ * consumer, PluginStorageService, so the knob is named for the registry and per-plugin storage it
+ * actually moves and claims nothing about the rest of the tree. Without it the plugin registry is
+ * the one piece of state a test lane cannot redirect, which is why every e2e suite in a run shares
+ * one registry file and rewrites the developer's copy of it.
  */
 export const DEFAULT_DATA_DIR = './data';
 
@@ -47,25 +57,48 @@ export function resolveNonNegativeIntEnv(raw: string | undefined, fallback: numb
 }
 
 /**
- * The UI locale Chromium is pinned to. WhatsApp Web renders its chrome — including the new-account
- * onboarding modal the whatsapp-web.js adapter dismisses (#982) — in the browser's language, and that
- * detector matches visible English text. Without a pin the language is whatever the launched binary
- * defaults to, which differs between the amd64 (Chrome for Testing) and arm64 (Debian chromium) images
- * and between host installs.
+ * Largest delay Node's timers accept. Above this a `setTimeout` overflows its 32-bit signed field,
+ * warns `TimeoutOverflowWarning`, and fires after 1 ms instead — so an operator reaching for an
+ * "effectively unlimited" budget by typing a row of nines gets the shortest possible one. Puppeteer
+ * arms `protocolTimeout` with a plain `setTimeout` (`common/CallbackRegistry.js`), so the ceiling
+ * applies to it directly and the browser never finishes launching.
+ */
+export { MAX_TIMER_MS };
+
+/**
+ * The UI locale Chromium is pinned to. Without a pin the browser's language is whatever the launched
+ * binary defaults to, which differs between the amd64 (Chrome for Testing) and arm64 (Debian chromium)
+ * images and between host installs. The pin settles the browser's locale only: WhatsApp Web can still
+ * render its chrome, including the new-account onboarding modal the whatsapp-web.js adapter dismisses
+ * (#982), in the account's own language (#1679), so a non-English modal needs
+ * WWEBJS_ONBOARDING_CONTINUE_LABELS.
  */
 export const PINNED_BROWSER_LOCALE = 'en-US';
+
+/**
+ * Chromium launch flags used when PUPPETEER_ARGS is unset, and the single fallback for every other
+ * path that has no configured args (the adapter, the Infrastructure save and status views).
+ * --disable-dev-shm-usage keeps tabs from crashing on Docker's 64 MB /dev/shm.
+ */
+export const DEFAULT_PUPPETEER_ARGS: readonly string[] = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+];
 
 /**
  * Append the locale pin unless the operator already set one. Deliberately applied AFTER the
  * PUPPETEER_ARGS override rather than baked into the default string: that variable REPLACES the
  * defaults, so a deployment that customises args for an unrelated reason would otherwise silently
- * lose the pin and the onboarding detector with it. An explicit `--lang` always wins.
+ * lose the pin and fall back to the binary's default browser language. An explicit `--lang` always
+ * wins.
  *
  * Returns a NEW array — never mutates the input — because the resolved args object is shared by every
  * session, and pushing per-session flags onto a shared array leaked proxy settings across sessions
  * once already (#840).
  */
-export function withPinnedBrowserLocale(args: string[]): string[] {
+export function withPinnedBrowserLocale(args: readonly string[]): string[] {
   return args.some(arg => arg.startsWith('--lang')) ? [...args] : [...args, `--lang=${PINNED_BROWSER_LOCALE}`];
 }
 
@@ -74,20 +107,20 @@ export default () => ({
 
   // Root of the persistent state tree (see DEFAULT_DATA_DIR). Read by PluginStorageService for the
   // plugin registry and per-plugin storage; the other data paths keep their own env-specific keys.
-  dataDir: DEFAULT_DATA_DIR,
+  dataDir: process.env.PLUGIN_STATE_DIR || DEFAULT_DATA_DIR,
 
   // HTTP server timeouts (Node http.Server). Pinned explicitly so they are operator-tunable and
   // observable at boot rather than left at Node's implicit defaults. requestTimeout defaults to
   // Node's 300s; keepAliveTimeout to 5s; headersTimeout to 65s (a second above keepAlive — Node
-  // requires headers > keepAlive, and main.ts normalizes it anyway). Set any to 0 at your own risk;
-  // env.validation rejects 0 so a bound is never silently disabled.
+  // requires headers > keepAlive, and main.ts normalizes it anyway). env.validation rejects 0 for all
+  // three, so a bound is never silently disabled.
   http: {
-    requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '300000', 10),
+    requestTimeoutMs: resolveRequestTimeoutMs(process.env.REQUEST_TIMEOUT_MS),
     headersTimeoutMs: parseInt(process.env.HEADERS_TIMEOUT_MS || '65000', 10),
     keepAliveTimeoutMs: parseInt(process.env.KEEPALIVE_TIMEOUT_MS || '5000', 10),
     // Aggregate cap on request-body bytes buffered across ALL connections (the pre-body-parser
-    // budget middleware in main.ts). Defaults to 4 × the per-request BODY_SIZE_LIMIT so the two
-    // scale together; explicit bytes override via INFLIGHT_BODY_BUDGET_BYTES.
+    // budget middleware in src/configure-app.ts). Defaults to 4 × the per-request BODY_SIZE_LIMIT so
+    // the two scale together; explicit bytes override via INFLIGHT_BODY_BUDGET_BYTES.
     inflightBodyBudgetBytes: resolveInflightBodyBudgetBytes(
       process.env.INFLIGHT_BODY_BUDGET_BYTES,
       process.env.BODY_SIZE_LIMIT,
@@ -96,11 +129,12 @@ export default () => ({
 
   // Global message search. Opt-out via SEARCH_ENABLED=false. Provider defaults to 'auto' (the
   // built-in DB full-text provider — Postgres tsvector/GIN, SQLite FTS5); 'none' disables the
-  // /search route + module at runtime while keeping the config namespace loaded.
+  // /search route + module at runtime while keeping the config namespace loaded. match=contains is
+  // opt-in (SEARCH_CONTAINS_ENABLED=true): its trigram index costs about three times the message text.
   search: {
     enabled: process.env.SEARCH_ENABLED !== 'false',
     provider: process.env.SEARCH_PROVIDER || 'auto',
-    limitMax: Number(process.env.SEARCH_LIMIT_MAX) || 100,
+    containsEnabled: process.env.SEARCH_CONTAINS_ENABLED === 'true',
   },
 
   // Dashboard statistics. The /stats aggregates run GROUP BY scans over the whole messages
@@ -144,13 +178,12 @@ export default () => ({
     // SQLite file for the auth/audit DB. Overridable (e.g. e2e points it at a temp file) so tests
     // never write api keys into the developer's ./data/main.sqlite.
     database: process.env.MAIN_DATABASE_NAME || './data/main.sqlite',
-    // Schema management for the auth/audit DB. Default ON (zero-config first boot).
-    // Set MAIN_DATABASE_SYNCHRONIZE=false to manage schema via the main-owned migrations
-    // instead (migrationsRun then creates api_keys/audit_logs). When disabled, run the
-    // main-connection migrations explicitly with `npm run migration:run:main` (or
-    // `migration:run:main:prod` for the compiled image) — the plain `migration:run` only
-    // manages the data connection.
-    synchronize: process.env.MAIN_DATABASE_SYNCHRONIZE !== 'false',
+    // Schema management for the auth/audit DB. By default the main-owned migrations run at boot
+    // (they also adopt a file an earlier release built with synchronize); run them by hand with
+    // `npm run migration:run:main` (or `migration:run:main:prod` for the compiled image), since the
+    // plain `migration:run` only manages the data connection. MAIN_DATABASE_SYNCHRONIZE=true also
+    // synchronizes after the chain, which main.ts warns about in production.
+    synchronize: process.env.MAIN_DATABASE_SYNCHRONIZE === 'true',
     logging: process.env.DATABASE_LOGGING === 'true',
   },
 
@@ -196,15 +229,29 @@ export default () => ({
       // Accept either delimiter: .env/compose use commas, the dashboard Infrastructure form
       // persists space-separated. Splitting on both keeps each flag a discrete argv token —
       // a single glued token like "--no-sandbox --disable-gpu" silently neuters --no-sandbox.
+      // A comma only splits before the next flag, since flag values carry commas of their own
+      // (--disable-features=A,B, --window-size=1280,720).
       args: withPinnedBrowserLocale(
-        (process.env.PUPPETEER_ARGS || '--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage,--disable-gpu')
-          .split(/[\s,]+/)
+        (process.env.PUPPETEER_ARGS || DEFAULT_PUPPETEER_ARGS.join(','))
+          .split(/\s+|,+(?=-)/)
+          .map(arg => arg.replace(/^,+|,+$/g, ''))
           .filter(Boolean),
       ),
       // Optional path to a system Chromium/Chrome binary. When unset, whatsapp-web.js
       // uses Puppeteer's bundled Chromium. Required on hosts where the bundled binary
       // is missing or incompatible (Alpine, ARM, custom base images).
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      // How long one CDP command may take. An account with thousands of chats can push a single
+      // chat-list read past Puppeteer's own budget; raising this is the escape hatch. Left
+      // UNDEFINED rather than defaulted to Puppeteer's number, so an unset or out-of-range value
+      // means "whatever puppeteer-core's `timeout ?? 180_000` says" instead of pinning today's
+      // figure here and silently outliving it. Out of range is not clamped either: see
+      // wwebjs-lifecycle.ts for why a falsy value is not "no limit", and MAX_TIMER_MS above for
+      // why a huge one is not either.
+      protocolTimeoutMs: (() => {
+        const n = parseInt(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS || '', 10);
+        return Number.isFinite(n) && n > 0 && n <= MAX_TIMER_MS ? n : undefined;
+      })(),
     },
     sessionDataPath: process.env.SESSION_DATA_PATH || './data/sessions',
     // Baileys engine (used when ENGINE_TYPE=baileys). Multi-file auth state base dir; each session
@@ -230,37 +277,39 @@ export default () => ({
     // Bound parked inline deliveries as well as active sockets. Queue-full dispatches are recorded in
     // webhook_delivery_failures instead of retaining payload closures without limit.
     dispatchMaxQueued: parseInt(process.env.WEBHOOK_DISPATCH_MAX_QUEUED || '1000', 10),
+    // How many deliveries to failing receivers one session may run at once, per node, in direct and
+    // queued mode alike; healthy receivers are not limited. Unset or garbage leaves it undefined, and
+    // each path then uses a quarter of its own pool (at least 1).
+    degradedSessionConcurrency: (() => {
+      const n = parseInt(process.env.WEBHOOK_DEGRADED_SESSION_CONCURRENCY ?? '', 10);
+      return Number.isInteger(n) && n > 0 ? n : undefined;
+    })(),
     // Upper bound on the serialized webhook body after webhook:before hooks ran; oversize payloads
     // are recorded as undelivered instead of being sent/persisted. Default 1 MiB. Fail-safe like the
     // other byte caps: a non-numeric or non-positive value falls back to the default. 0 is NOT an
     // opt-out here — a 0-byte cap rejects every dispatch (a total webhook outage), and a NaN would
     // silently disable the cap (`payloadBytes > NaN` is always false). env.validation rejects
     // non-decimal / non-positive values at boot.
-    maxPayloadBytes: (() => {
-      const n = parseInt(process.env.WEBHOOK_MAX_PAYLOAD_BYTES ?? '', 10);
-      return Number.isFinite(n) && n > 0 ? n : 1024 * 1024;
-    })(),
+    maxPayloadBytes: positiveIntFromEnv('WEBHOOK_MAX_PAYLOAD_BYTES', 1024 * 1024),
     // Max webhooks registered per session. One inbound event fans out to every registered webhook
     // of the session, so an unbounded count multiplies per-event copies of the payload. Creating a
     // NEW webhook above the cap is rejected with 400; existing ones are grandfathered (never
     // deleted). Default 16; 0 disables the cap. Garbage falls back to the default.
-    maxPerSession: (() => {
-      const n = parseInt(process.env.WEBHOOK_MAX_PER_SESSION ?? '', 10);
-      return Number.isFinite(n) && n >= 0 ? n : 16;
-    })(),
+    maxPerSession: resolveNonNegativeIntEnv(process.env.WEBHOOK_MAX_PER_SESSION, 16),
     // Inline base64 media cap for webhook payloads (decoded bytes). A media blob larger than this
     // is replaced with the { omitted: true, sizeBytes } marker BEFORE the payload is cloned per
     // webhook / queued into Redis, so fan-out and failed-job retention never copy the blob. Media
     // at or under the cap stays inline (unchanged). Default 1 MiB; 0 = never inline media. Garbage
     // falls back to the default.
-    mediaInlineMaxBytes: (() => {
-      const n = parseInt(process.env.WEBHOOK_MEDIA_INLINE_MAX_BYTES ?? '', 10);
-      return Number.isFinite(n) && n >= 0 ? n : 1024 * 1024;
-    })(),
+    mediaInlineMaxBytes: resolveNonNegativeIntEnv(process.env.WEBHOOK_MEDIA_INLINE_MAX_BYTES, 1024 * 1024),
     // How long shutdown waits for in-flight direct deliveries to finish before abandoning them.
     // 0 = don't wait (explicit opt-out); blank/garbage falls back to the default — a NaN here would
     // silently remove the drain deadline downstream (Math.max(0, NaN) is NaN).
-    shutdownDrainMs: resolveNonNegativeIntEnv(process.env.WEBHOOK_SHUTDOWN_DRAIN_MS, 5000),
+    shutdownDrainMs: resolveNonNegativeIntEnv(process.env.WEBHOOK_SHUTDOWN_DRAIN_MS, DEFAULT_WEBHOOK_SHUTDOWN_DRAIN_MS),
+    // How long a terminal delivery-failure row keeps the event data it was built from, so
+    // `POST /webhooks/delivery-failures/redrive` can replay it. 0 (the default) stores nothing, which
+    // is the pre-redrive behaviour. The retention sweep nulls an expired payload and keeps the row.
+    failurePayloadRetentionHours: resolveNonNegativeIntEnv(process.env.WEBHOOK_FAILURE_PAYLOAD_RETENTION_HOURS, 0),
   },
 
   // API configuration
@@ -292,10 +341,7 @@ export default () => ({
     // may be trusted for client-IP resolution. Empty by default: X-Forwarded-For
     // is ignored and the direct socket address is used, preventing spoofing of
     // the API-key allowedIps whitelist.
-    trustedProxies: (process.env.TRUSTED_PROXIES || '')
-      .split(',')
-      .map(proxy => proxy.trim())
-      .filter(Boolean),
+    trustedProxies: parseTrustedProxies(process.env.TRUSTED_PROXIES),
   },
 
   // Plugin platform configuration
@@ -343,7 +389,8 @@ export default () => ({
     // fully-unauthenticated @Public() endpoint: once an instance is provisioned against it, anyone who can
     // reach the host can POST a forged payload that triggers outbound WhatsApp sends. Default off — only
     // set ALLOW_UNSIGNED_INGRESS=true for a provider that genuinely offers no HMAC, and front the route
-    // with a network/reverse-proxy ACL. Refused in production by the boot guard unless explicitly set.
+    // with a network/reverse-proxy ACL. With the flag off, the plugin loader refuses such a manifest in every
+    // environment (validateIngressManifest).
     allowUnsigned: process.env.ALLOW_UNSIGNED_INGRESS === 'true',
   },
 
@@ -374,6 +421,11 @@ export default () => ({
   chatMedia: {
     // Off by default: archiving doubles storage for media under the cap, since the inline copy stays.
     archiveEnabled: process.env.CHAT_MEDIA_ARCHIVE_ENABLED === 'true',
+    // Extend archiving to media this account SENT. A sub-flag rather than a mode of its own, so what
+    // it writes lands under the same prefix and is maintained by the same retention purge and orphan
+    // sweep. Off by default because it doubles storage again for the outbound half; a URL-based send
+    // stores no bytes to archive on Baileys, and on whatsapp-web.js the echo row may hold them.
+    archiveOutbound: process.env.CHAT_MEDIA_ARCHIVE_OUTBOUND === 'true',
     // Per-file cap on archived chat media (default 25 MiB). Media above it is simply not archived —
     // the message row and its inline copy are unaffected.
     maxBytes: (() => {
@@ -397,6 +449,11 @@ export default () => ({
       const n = parseInt(process.env.CHAT_MEDIA_ORPHAN_GRACE_MS ?? '', 10);
       return Number.isFinite(n) && n > 0 ? n : 60 * 60 * 1000;
     })(),
+    // What happens to a row's inline base64 once its media is archived. 'inline' (the default) keeps
+    // it, as before. 'archive' replaces it with the omitted marker after the file is stored and
+    // verified, so the bytes live once, in the file store; reads go through the media route.
+    // Validated at boot to need CHAT_MEDIA_ARCHIVE_ENABLED=true.
+    inlineMode: process.env.MESSAGE_INLINE_MEDIA === 'archive' ? ('archive' as const) : ('inline' as const),
   },
 
   // Session ownership across processes. A session's engine runs in exactly one process; these
@@ -430,8 +487,9 @@ export default () => ({
       return Number.isFinite(n) && n > 0 ? n : 20_000;
     })(),
     // Takeover sweep cadence (default 30s): how often a node looks for sessions whose holder's
-    // lease has lapsed — a crashed peer, or this node's own previous identity after a container
-    // recreate — and starts them here. Gated by the AUTO_START_SESSIONS feature flag.
+    // lease has lapsed (a crashed peer, or this node's own previous identity after a container
+    // recreate) and starts them here. Adopting follows the AUTO_START_SESSIONS feature flag; the
+    // sweep itself runs on every node and also marks a vanished node's leftover rows disconnected.
     takeoverSweepMs: (() => {
       const n = parseInt(process.env.SESSION_TAKEOVER_SWEEP_MS ?? '', 10);
       return Number.isFinite(n) && n > 0 ? n : 30_000;
@@ -503,6 +561,7 @@ export default () => ({
       accessKeyId: process.env.S3_ACCESS_KEY_ID,
       secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
       endpoint: process.env.S3_ENDPOINT,
+      keyPrefix: process.env.S3_KEY_PREFIX,
     },
   },
 });

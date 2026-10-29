@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { ChatKind } from '../../../engine/identity/wa-id';
+import type { MessageType } from '../../../engine/interfaces/whatsapp-engine.interface';
+import { MESSAGE_TYPES } from '../../webhook/filters/filter-types';
 
 const CHAT_KINDS: ChatKind[] = ['individual', 'group', 'channel', 'status', 'broadcast', 'unknown'];
 
@@ -25,4 +27,38 @@ export class ChatSummaryDto {
 
   @ApiPropertyOptional({ example: 'hi' })
   lastMessage?: string;
+
+  @ApiPropertyOptional({
+    enum: MESSAGE_TYPES,
+    description: 'Engine-neutral type of the last message, when available.',
+    example: 'image',
+  })
+  lastMessageType?: MessageType;
+
+  @ApiProperty({ description: 'Archived state, as set via POST /sessions/{sessionId}/chats/archive.', example: false })
+  archived!: boolean;
+
+  @ApiProperty({ description: 'Pinned state, as set via POST /sessions/{sessionId}/chats/pin.', example: false })
+  pinned!: boolean;
+
+  @ApiProperty({
+    description:
+      'Whether the chat is muted right now, as set via POST /sessions/{sessionId}/chats/mute. The ' +
+      'verdict rather than the expiry: whatsapp-web.js derives it itself from Chat.isMuted, and ' +
+      'Baileys carries a muteEndTime that this gateway compares against now. muteExpiration carries ' +
+      'the instant itself.',
+    example: false,
+  })
+  muted!: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Epoch MILLISECONDS at which the mute ends, present only when muted is true; 0 means muted ' +
+      'indefinitely. Milliseconds is the same unit as POST /sessions/{sessionId}/chats/mute ' +
+      'muteUntil, so a finite value can be written straight back. The 0 an indefinite mute reports ' +
+      'is the exception: muteUntil requires a real future instant, so re-apply an indefinite mute ' +
+      'with a far-future timestamp rather than 0.',
+    example: 1786003600000,
+  })
+  muteExpiration?: number;
 }

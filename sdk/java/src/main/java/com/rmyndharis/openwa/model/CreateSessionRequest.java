@@ -2,8 +2,11 @@ package com.rmyndharis.openwa.model;
 
 import java.util.Map;
 
-/** Request body for creating a session. Requires an OPERATOR-level key. */
-public record CreateSessionRequest(String name, Map<String, Object> config, String proxyUrl, String proxyType) {
+/**
+ * Request body for creating a session. Requires an OPERATOR-level key; setting {@code proxyUrl}
+ * requires an ADMIN key.
+ */
+public record CreateSessionRequest(String name, Map<String, Object> config, String proxyUrl, ProxyType proxyType) {
     public static Builder builder() {
         return new Builder();
     }
@@ -12,7 +15,7 @@ public record CreateSessionRequest(String name, Map<String, Object> config, Stri
         private String name;
         private Map<String, Object> config;
         private String proxyUrl;
-        private String proxyType;
+        private ProxyType proxyType;
 
         /** Alphanumeric + hyphens, 3–50 chars. */
         public Builder name(String v) {
@@ -25,13 +28,15 @@ public record CreateSessionRequest(String name, Map<String, Object> config, Stri
             return this;
         }
 
+        /** Requires an ADMIN key; the gateway answers 403 otherwise. */
         public Builder proxyUrl(String v) {
             this.proxyUrl = v;
             return this;
         }
 
-        /** One of {@code http}, {@code https}, {@code socks4}, {@code socks5}. */
-        public Builder proxyType(String v) {
+        /** Deprecated and ignored by the server: the proxyUrl scheme selects the proxy protocol. */
+        @Deprecated
+        public Builder proxyType(ProxyType v) {
             this.proxyType = v;
             return this;
         }

@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Session } from './entities/session.entity';
 import { Message } from '../message/entities/message.entity';
 import { SessionService } from './session.service';
+import { SessionAuthDirMigration } from './session-auth-dir-migration.service';
 import { SessionEngineLifecycle } from './session-engine-lifecycle.service';
 import { SessionLidResolver } from './session-lid-resolver.service';
 import { SessionLivenessWatchdog } from './session-liveness-watchdog.service';
@@ -18,6 +19,7 @@ import { WebhookModule } from '../webhook/webhook.module';
 import { StatusStoreModule } from '../status-store/status-store.module';
 import { ChatMediaModule } from '../chat-media/chat-media.module';
 import { AutomationModule } from '../automation/automation.module';
+import { PLUGIN_SESSION_PORT } from '../../core/plugins/plugin-host-ports';
 
 @Module({
   // WebhookModule/StatusStoreModule/ChatMediaModule/AutomationModule do not import SessionModule
@@ -34,6 +36,10 @@ import { AutomationModule } from '../automation/automation.module';
     // Global on purpose: any controller may carry a session dimension. Inert unless NODE_URL is set.
     { provide: APP_INTERCEPTOR, useClass: SessionProxyInterceptor },
     SessionService,
+    // onModuleInit only, and every module's runs before the first onApplicationBootstrap, so the
+    // legacy name-keyed auth directories are moved onto their session ids before auto-start or the
+    // HTTP listener can open one.
+    SessionAuthDirMigration,
     SessionEngineLifecycle,
     SessionErrorStore,
     SessionRestrictionStore,
@@ -42,6 +48,11 @@ import { AutomationModule } from '../automation/automation.module';
     SessionLivenessWatchdog,
     SessionOwnershipService,
     MessageProjector,
+    // Binds the core-owned plugin capability port to this module's service; resolved lazily by the
+    // plugin runtime (PluginHostServices) so its provider cycle stays broken. An alias, not a
+    // factory: Nest runs lifecycle hooks once per non-alias provider, so a factory that returned the
+    // same instance ran SessionService's onModuleInit/onApplicationBootstrap/onModuleDestroy twice.
+    { provide: PLUGIN_SESSION_PORT, useExisting: SessionService },
   ],
   exports: [SessionService, MessageProjector, SessionOwnershipService],
 })

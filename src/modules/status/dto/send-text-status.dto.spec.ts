@@ -56,15 +56,60 @@ describe('SendTextStatusDto recipients validation', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('rejects malformed JIDs', async () => {
-    const errors = await validate(
-      plainToInstance(SendTextStatusDto, { text: 'hi', recipients: ['not-a-jid', '123@g.us', '@c.us', 'abc@lid'] }),
-    );
+  // One entry per validate call: any single bad entry fails the whole array, so a combined list
+  // would still fail if one of the others (a group JID, say) were wrongly accepted.
+  it.each(['not-a-jid', '123@g.us', '@c.us', 'abc@lid'])('rejects the malformed JID %s', async jid => {
+    const errors = await validate(plainToInstance(SendTextStatusDto, { text: 'hi', recipients: [jid] }));
     expect(errors.some(e => e.property === 'recipients')).toBe(true);
   });
 
   it('accepts @lid recipients', async () => {
     const errors = await validate(plainToInstance(SendTextStatusDto, { text: 'hi', recipients: ['6281@lid'] }));
     expect(errors).toHaveLength(0);
+  });
+});
+
+describe('SendTextStatusDto text validation', () => {
+  it('rejects an empty or whitespace-only body', async () => {
+    for (const text of ['', '   ', '\n\t']) {
+      const errors = await validate(plainToInstance(SendTextStatusDto, { text }));
+      expect(errors.some(e => e.property === 'text')).toBe(true);
+    }
+  });
+
+  it('accepts a body with surrounding whitespace', async () => {
+    expect(await validate(plainToInstance(SendTextStatusDto, { text: '  hi  ' }))).toHaveLength(0);
+  });
+
+  // docs/06: text is at most 4096 characters.
+  it('accepts exactly 4096 characters and rejects 4097', async () => {
+    const failing = async (text: string): Promise<string[]> =>
+      (await validate(plainToInstance(SendTextStatusDto, { text }))).map(e => e.property);
+
+    expect(await failing('x'.repeat(4096))).toEqual([]);
+    expect(await failing('x'.repeat(4097))).toEqual(['text']);
+  });
+});
+
+// docs/06: backgroundColor is a 6-digit hex colour matching ^#[0-9A-Fa-f]{6}$. A short form, a missing
+// hash or a non-hex digit is refused rather than handed to the engine to draw as it sees fit.
+describe('SendTextStatusDto backgroundColor validation', () => {
+  const failing = async (backgroundColor: string): Promise<string[]> =>
+    (await validate(plainToInstance(SendTextStatusDto, { text: 'hi', backgroundColor }))).map(e => e.property);
+
+  it.each(['#25D366', '#25d366', '#000000', '#FFFFFF'])('accepts %s', async color => {
+    expect(await failing(color)).toEqual([]);
+  });
+
+  it.each([
+    ['the 3-digit short form', '#abc'],
+    ['5 digits', '#25D36'],
+    ['7 digits', '#25D3666'],
+    ['no hash', '25D366'],
+    ['a non-hex digit', '#25D36G'],
+    ['trailing whitespace', '#25D366 '],
+    ['an empty string', ''],
+  ])('rejects %s', async (_label, color) => {
+    expect(await failing(color)).toEqual(['backgroundColor']);
   });
 });

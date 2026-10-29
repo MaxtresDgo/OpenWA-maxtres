@@ -1,4 +1,7 @@
 import { writeFileSync, chmodSync } from 'fs';
+import { createLogger } from '../services/logger.service';
+
+const logger = createLogger('SecretFile');
 
 /**
  * Write a secret file (e.g. the generated `.env`, the raw admin key) with owner-only permissions.
@@ -13,15 +16,17 @@ export function writeSecretFile(filePath: string, content: string): void {
   try {
     chmodSync(filePath, 0o600);
   } catch (error) {
-    // file not present yet, or chmod unsupported — create-mode below covers a new file. Log the
-    // failure so a world-readable secret on a chmod-unsupported FS (or an unexpected error) is
-    // not silently left world-readable after a rewrite.
-    console.warn(`[OpenWA] pre-write chmod 0o600 failed for ${filePath}: ${(error as Error).message}`);
+    // A file not present yet is expected: create-mode below covers it. Log any other failure so a
+    // world-readable secret on a chmod-unsupported FS (or an unexpected error) is not silently left
+    // world-readable after a rewrite.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logger.warn(`pre-write chmod 0o600 failed for ${filePath}: ${(error as Error).message}`);
+    }
   }
   writeFileSync(filePath, content, { mode: 0o600 });
   try {
     chmodSync(filePath, 0o600);
   } catch (error) {
-    console.warn(`[OpenWA] post-write chmod 0o600 failed for ${filePath}: ${(error as Error).message}`);
+    logger.warn(`post-write chmod 0o600 failed for ${filePath}: ${(error as Error).message}`);
   }
 }

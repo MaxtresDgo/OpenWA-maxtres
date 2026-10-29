@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { writeFileAtomic } = require('./atomic-write');
 
 const DEFAULT_WWJS = path.join(__dirname, '..', 'node_modules', 'whatsapp-web.js');
 const UTILS_PATH = path.join('src', 'util', 'Injected', 'Utils.js');
@@ -47,8 +48,21 @@ function applyBackport(wwjsDir = DEFAULT_WWJS) {
     );
   }
 
-  fs.writeFileSync(utilsFile, source.replace(LEGACY_CALL, CONTEXT_CALL));
+  writeFileAtomic(utilsFile, source.replace(LEGACY_CALL, CONTEXT_CALL));
   return { skipped: false, note: 'destination chat context added to link previews' };
+}
+
+/**
+ * The stand-down branch above as a predicate, for the startup guard (engine-patch-status.ts).
+ * Unreadable reads as applied: a tree we cannot inspect is not evidence of a broken one.
+ */
+function isApplied(wwjsDir = DEFAULT_WWJS) {
+  try {
+    const source = fs.readFileSync(path.join(wwjsDir, UTILS_PATH), 'utf8');
+    return occurrences(source, LEGACY_CALL) === 0 && occurrences(source, CONTEXT_CALL) === 1;
+  } catch {
+    return true;
+  }
 }
 
 function run() {
@@ -70,4 +84,4 @@ function run() {
 
 if (require.main === module) run();
 
-module.exports = { applyBackport, LEGACY_CALL, CONTEXT_CALL };
+module.exports = { applyBackport, isApplied, LEGACY_CALL, CONTEXT_CALL };

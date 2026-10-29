@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
-import { ToStrictNumber } from '../../../common/utils/strict-boolean';
+import { ToStrictNumber, ToStrictString } from '../../../common/utils/strict-boolean';
 
 /**
  * The body of a label create-or-update. The id is the path parameter, not a field: WhatsApp keys the
@@ -8,12 +8,13 @@ import { ToStrictNumber } from '../../../common/utils/strict-boolean';
  */
 export class UpsertLabelDto {
   @ApiPropertyOptional({
-    description: 'Label name. Omit to leave the current name untouched.',
+    description: 'Label name. The write replaces the whole label, so an omitted name is not preserved.',
     example: 'VIP customer',
     minLength: 1,
     maxLength: 100,
   })
   @IsOptional()
+  @ToStrictString()
   @IsString()
   @MinLength(1)
   // WhatsApp's own label editor caps names well below this; the bound exists so a runaway payload
@@ -24,7 +25,7 @@ export class UpsertLabelDto {
   @ApiPropertyOptional({
     description:
       "WhatsApp's colour INDEX (0-19), not a hex value — the read path's `hexColor` cannot be " +
-      'translated back, because neither engine exposes the mapping. Omit to leave the colour alone.',
+      'translated back, because neither engine exposes the mapping. An omitted colour is not preserved.',
     example: 3,
     minimum: 0,
     maximum: 19,

@@ -2,6 +2,7 @@ package openwa
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
 
@@ -20,6 +21,10 @@ func TestRouting(t *testing.T) {
 		{"Sessions.List", func(c *Client) { c.Sessions.List(ctx, nil) }, "GET", "/api/sessions"},
 		{"Sessions.Get", func(c *Client) { c.Sessions.Get(ctx, "s1") }, "GET", "/api/sessions/s1"},
 		{"Sessions.Create", func(c *Client) { c.Sessions.Create(ctx, CreateSessionRequest{}) }, "POST", "/api/sessions"},
+		{"Sessions.GetConfig", func(c *Client) { c.Sessions.GetConfig(ctx, "s1") }, "GET", "/api/sessions/s1/config"},
+		{"Sessions.UpdateConfig", func(c *Client) { c.Sessions.UpdateConfig(ctx, "s1", UpdateSessionConfigRequest{}) }, "PATCH", "/api/sessions/s1/config"},
+		{"Sessions.GetProxy", func(c *Client) { c.Sessions.GetProxy(ctx, "s1") }, "GET", "/api/sessions/s1/proxy"},
+		{"Sessions.UpdateProxy", func(c *Client) { c.Sessions.UpdateProxy(ctx, "s1", UpdateSessionProxyRequest{}) }, "PATCH", "/api/sessions/s1/proxy"},
 		{"Sessions.Delete", func(c *Client) { c.Sessions.Delete(ctx, "s1") }, "DELETE", "/api/sessions/s1"},
 		{"Sessions.Start", func(c *Client) { c.Sessions.Start(ctx, "s1") }, "POST", "/api/sessions/s1/start"},
 		{"Sessions.Stop", func(c *Client) { c.Sessions.Stop(ctx, "s1") }, "POST", "/api/sessions/s1/stop"},
@@ -27,6 +32,7 @@ func TestRouting(t *testing.T) {
 		{"Sessions.ForceKill", func(c *Client) { c.Sessions.ForceKill(ctx, "s1") }, "POST", "/api/sessions/s1/force-kill"},
 		{"Sessions.QRCode", func(c *Client) { c.Sessions.QRCode(ctx, "s1") }, "GET", "/api/sessions/s1/qr"},
 		{"Sessions.RequestPairingCode", func(c *Client) { c.Sessions.RequestPairingCode(ctx, "s1", RequestPairingCodeRequest{}) }, "POST", "/api/sessions/s1/pairing-code"},
+		{"Sessions.SetOnlinePresence", func(c *Client) { c.Sessions.SetOnlinePresence(ctx, "s1", SetOwnPresenceRequest{}) }, "PUT", "/api/sessions/s1/presence"},
 		{"Sessions.Stats", func(c *Client) { c.Sessions.Stats(ctx) }, "GET", "/api/sessions/stats/overview"},
 
 		{"Messages.List", func(c *Client) { c.Messages.List(ctx, "s1", nil) }, "GET", "/api/sessions/s1/messages"},
@@ -41,6 +47,7 @@ func TestRouting(t *testing.T) {
 		{"Messages.SendTemplate", func(c *Client) { c.Messages.SendTemplate(ctx, "s1", SendTemplateRequest{}) }, "POST", "/api/sessions/s1/messages/send-template"},
 		{"Messages.SendPoll", func(c *Client) { c.Messages.SendPoll(ctx, "s1", SendPollRequest{}) }, "POST", "/api/sessions/s1/messages/send-poll"},
 		{"Messages.Reply", func(c *Client) { c.Messages.Reply(ctx, "s1", ReplyMessageRequest{}) }, "POST", "/api/sessions/s1/messages/reply"},
+		{"Messages.ClickButton", func(c *Client) { c.Messages.ClickButton(ctx, "s1", ClickButtonRequest{}) }, "POST", "/api/sessions/s1/messages/click-button"},
 		{"Messages.Forward", func(c *Client) { c.Messages.Forward(ctx, "s1", ForwardMessageRequest{}) }, "POST", "/api/sessions/s1/messages/forward"},
 		{"Messages.React", func(c *Client) { c.Messages.React(ctx, "s1", ReactMessageRequest{}) }, "POST", "/api/sessions/s1/messages/react"},
 		{"Messages.Delete", func(c *Client) { c.Messages.Delete(ctx, "s1", DeleteMessageRequest{}) }, "POST", "/api/sessions/s1/messages/delete"},
@@ -61,6 +68,7 @@ func TestRouting(t *testing.T) {
 		{"Contacts.Delete", func(c *Client) { c.Contacts.Delete(ctx, "s1", "c1") }, "DELETE", "/api/sessions/s1/contacts/c1"},
 		{"Contacts.Block", func(c *Client) { c.Contacts.Block(ctx, "s1", "u1") }, "POST", "/api/sessions/s1/contacts/u1/block"},
 		{"Contacts.Unblock", func(c *Client) { c.Contacts.Unblock(ctx, "s1", "u1") }, "DELETE", "/api/sessions/s1/contacts/u1/block"},
+		{"Contacts.ListBlocked", func(c *Client) { c.Contacts.ListBlocked(ctx, "s1") }, "GET", "/api/sessions/s1/contacts/blocked"},
 
 		{"Groups.GetPicture", func(c *Client) { c.Groups.GetPicture(ctx, "s1", "g1") }, "GET", "/api/sessions/s1/groups/g1/picture"},
 		{"Groups.SetPicture", func(c *Client) { c.Groups.SetPicture(ctx, "s1", "g1", SetGroupPictureRequest{}) }, "PUT", "/api/sessions/s1/groups/g1/picture"},
@@ -69,15 +77,20 @@ func TestRouting(t *testing.T) {
 		{"Groups.Get", func(c *Client) { c.Groups.Get(ctx, "s1", "g1") }, "GET", "/api/sessions/s1/groups/g1"},
 		{"Groups.Create", func(c *Client) { c.Groups.Create(ctx, "s1", CreateGroupRequest{}) }, "POST", "/api/sessions/s1/groups"},
 		{"Groups.JoinGroup", func(c *Client) { c.Groups.JoinGroup(ctx, "s1", JoinGroupRequest{}) }, "POST", "/api/sessions/s1/groups/join"},
+		{"Groups.JoinInfo", func(c *Client) { c.Groups.JoinInfo(ctx, "s1", "abc") }, "GET", "/api/sessions/s1/groups/join-info"},
 		{"Groups.AddParticipants", func(c *Client) { c.Groups.AddParticipants(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/participants"},
 		{"Groups.RemoveParticipants", func(c *Client) { c.Groups.RemoveParticipants(ctx, "s1", "g1", nil) }, "DELETE", "/api/sessions/s1/groups/g1/participants"},
 		{"Groups.PromoteParticipants", func(c *Client) { c.Groups.PromoteParticipants(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/participants/promote"},
 		{"Groups.DemoteParticipants", func(c *Client) { c.Groups.DemoteParticipants(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/participants/demote"},
 		{"Groups.SetSubject", func(c *Client) { c.Groups.SetSubject(ctx, "s1", "g1", "x") }, "PUT", "/api/sessions/s1/groups/g1/subject"},
 		{"Groups.SetDescription", func(c *Client) { c.Groups.SetDescription(ctx, "s1", "g1", "x") }, "PUT", "/api/sessions/s1/groups/g1/description"},
+		{"Groups.SetMemberLabel", func(c *Client) { c.Groups.SetMemberLabel(ctx, "s1", "g1", "x") }, "PUT", "/api/sessions/s1/groups/g1/member-label"},
 		{"Groups.Leave", func(c *Client) { c.Groups.Leave(ctx, "s1", "g1") }, "POST", "/api/sessions/s1/groups/g1/leave"},
 		{"Groups.InviteCode", func(c *Client) { c.Groups.InviteCode(ctx, "s1", "g1") }, "GET", "/api/sessions/s1/groups/g1/invite-code"},
 		{"Groups.RevokeInviteCode", func(c *Client) { c.Groups.RevokeInviteCode(ctx, "s1", "g1") }, "POST", "/api/sessions/s1/groups/g1/invite-code/revoke"},
+		{"Groups.GetMembershipRequests", func(c *Client) { c.Groups.GetMembershipRequests(ctx, "s1", "g1") }, "GET", "/api/sessions/s1/groups/g1/membership-requests"},
+		{"Groups.ApproveMembershipRequests", func(c *Client) { c.Groups.ApproveMembershipRequests(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/membership-requests/approve"},
+		{"Groups.RejectMembershipRequests", func(c *Client) { c.Groups.RejectMembershipRequests(ctx, "s1", "g1", nil) }, "POST", "/api/sessions/s1/groups/g1/membership-requests/reject"},
 		{"Groups.GetGroupSettings", func(c *Client) { c.Groups.GetGroupSettings(ctx, "s1", "g1") }, "GET", "/api/sessions/s1/groups/g1/settings"},
 		{"Groups.UpdateGroupSettings", func(c *Client) { c.Groups.UpdateGroupSettings(ctx, "s1", "g1", GroupSettings{}) }, "PUT", "/api/sessions/s1/groups/g1/settings"},
 
@@ -87,10 +100,17 @@ func TestRouting(t *testing.T) {
 		{"Webhooks.Update", func(c *Client) { c.Webhooks.Update(ctx, "s1", "w1", UpdateWebhookRequest{}) }, "PUT", "/api/sessions/s1/webhooks/w1"},
 		{"Webhooks.Delete", func(c *Client) { c.Webhooks.Delete(ctx, "s1", "w1") }, "DELETE", "/api/sessions/s1/webhooks/w1"},
 		{"Webhooks.Test", func(c *Client) { c.Webhooks.Test(ctx, "s1", "w1") }, "POST", "/api/sessions/s1/webhooks/w1/test"},
+		{"Webhooks.ListAll", func(c *Client) { c.Webhooks.ListAll(ctx, nil) }, "GET", "/api/webhooks"},
+		{"Webhooks.DeliveryFailures", func(c *Client) { c.Webhooks.DeliveryFailures(ctx, nil) }, "GET", "/api/webhooks/delivery-failures"},
+		{"Webhooks.RedriveDeliveryFailures", func(c *Client) { c.Webhooks.RedriveDeliveryFailures(ctx, nil) }, "POST", "/api/webhooks/delivery-failures/redrive"},
+
+		{"Media.ConversionStatus", func(c *Client) { c.Media.ConversionStatus(ctx, "s1") }, "GET", "/api/sessions/s1/media/convert"},
+		{"Media.ConvertVoice", func(c *Client) { c.Media.ConvertVoice(ctx, "s1", ConvertMediaInput{}) }, "POST", "/api/sessions/s1/media/convert/voice"},
+		{"Media.ConvertVideo", func(c *Client) { c.Media.ConvertVideo(ctx, "s1", ConvertMediaInput{}) }, "POST", "/api/sessions/s1/media/convert/video"},
 
 		{"Chats.List", func(c *Client) { c.Chats.List(ctx, "s1", nil) }, "GET", "/api/sessions/s1/chats"},
-		{"Chats.MarkRead", func(c *Client) { c.Chats.MarkRead(ctx, "s1", MarkChatRequest{}) }, "POST", "/api/sessions/s1/chats/read"},
-		{"Chats.SubscribePresence", func(c *Client) { c.Chats.SubscribePresence(ctx, "s1", MarkChatRequest{}) }, "POST", "/api/sessions/s1/presence/subscribe"},
+		{"Chats.MarkRead", func(c *Client) { c.Chats.MarkRead(ctx, "s1", MarkChatReadRequest{}) }, "POST", "/api/sessions/s1/chats/read"},
+		{"Chats.SubscribePresence", func(c *Client) { c.Chats.SubscribePresence(ctx, "s1", SubscribePresenceRequest{}) }, "POST", "/api/sessions/s1/presence/subscribe"},
 		{"Channels.Create", func(c *Client) { c.Channels.Create(ctx, "s1", CreateChannelRequest{}) }, "POST", "/api/sessions/s1/channels"},
 		{"Channels.Delete", func(c *Client) { c.Channels.Delete(ctx, "s1", "ch1") }, "POST", "/api/sessions/s1/channels/ch1/delete"},
 		{"Channels.Mute", func(c *Client) { c.Channels.Mute(ctx, "s1", "ch1", MuteChannelRequest{}) }, "POST", "/api/sessions/s1/channels/ch1/mute"},
@@ -101,6 +121,8 @@ func TestRouting(t *testing.T) {
 		{"Chats.MarkUnread", func(c *Client) { c.Chats.MarkUnread(ctx, "s1", MarkChatRequest{}) }, "POST", "/api/sessions/s1/chats/unread"},
 		{"Chats.ClearMessages", func(c *Client) { c.Chats.ClearMessages(ctx, "s1", "c1") }, "DELETE", "/api/sessions/s1/chats/c1/messages"},
 		{"Chats.Archive", func(c *Client) { c.Chats.Archive(ctx, "s1", ArchiveChatRequest{}) }, "POST", "/api/sessions/s1/chats/archive"},
+		{"Chats.Pin", func(c *Client) { c.Chats.Pin(ctx, "s1", PinChatRequest{}) }, "POST", "/api/sessions/s1/chats/pin"},
+		{"Chats.Mute", func(c *Client) { c.Chats.Mute(ctx, "s1", MuteChatRequest{}) }, "POST", "/api/sessions/s1/chats/mute"},
 		{"Chats.Delete", func(c *Client) { c.Chats.Delete(ctx, "s1", DeleteChatRequest{}) }, "POST", "/api/sessions/s1/chats/delete"},
 		{"Chats.SendState", func(c *Client) { c.Chats.SendState(ctx, "s1", SendChatStateRequest{}) }, "POST", "/api/sessions/s1/chats/typing"},
 
@@ -129,12 +151,13 @@ func TestRouting(t *testing.T) {
 		{"Channels.Messages", func(c *Client) { c.Channels.Messages(ctx, "s1", "ch1", nil) }, "GET", "/api/sessions/s1/channels/ch1/messages"},
 		{"Channels.Subscribe", func(c *Client) { c.Channels.Subscribe(ctx, "s1", SubscribeChannelRequest{}) }, "POST", "/api/sessions/s1/channels/subscribe"},
 		{"Channels.Unsubscribe", func(c *Client) { c.Channels.Unsubscribe(ctx, "s1", "ch1") }, "DELETE", "/api/sessions/s1/channels/ch1"},
+		{"Channels.DemoteAdmin", func(c *Client) { c.Channels.DemoteAdmin(ctx, "s1", "c1", DemoteChannelAdminRequest{}) }, "POST", "/api/sessions/s1/channels/c1/admins/demote"},
+		{"Channels.TransferOwnership", func(c *Client) { c.Channels.TransferOwnership(ctx, "s1", "c1", TransferChannelOwnershipRequest{}) }, "POST", "/api/sessions/s1/channels/c1/owner/transfer"},
 
 		{"Catalog.Info", func(c *Client) { c.Catalog.Info(ctx, "s1") }, "GET", "/api/sessions/s1/catalog"},
 		{"Catalog.Products", func(c *Client) { c.Catalog.Products(ctx, "s1", nil) }, "GET", "/api/sessions/s1/catalog/products"},
 		{"Catalog.Product", func(c *Client) { c.Catalog.Product(ctx, "s1", "p1") }, "GET", "/api/sessions/s1/catalog/products/p1"},
 		{"Catalog.SendProduct", func(c *Client) { c.Catalog.SendProduct(ctx, "s1", SendProductRequest{}) }, "POST", "/api/sessions/s1/messages/send-product"},
-		{"Catalog.SendCatalog", func(c *Client) { c.Catalog.SendCatalog(ctx, "s1", SendCatalogRequest{}) }, "POST", "/api/sessions/s1/messages/send-catalog"},
 
 		{"Templates.List", func(c *Client) { c.Templates.List(ctx, "s1") }, "GET", "/api/sessions/s1/templates"},
 		{"Templates.Get", func(c *Client) { c.Templates.Get(ctx, "s1", "t1") }, "GET", "/api/sessions/s1/templates/t1"},
@@ -152,8 +175,29 @@ func TestRouting(t *testing.T) {
 		{"Profile.SetProfileName", func(c *Client) { c.Profile.SetProfileName(ctx, "s1", SetProfileNameRequest{}) }, "PUT", "/api/sessions/s1/profile/name"},
 		{"Profile.SetProfileStatus", func(c *Client) { c.Profile.SetProfileStatus(ctx, "s1", SetProfileStatusRequest{}) }, "PUT", "/api/sessions/s1/profile/status"},
 		{"Profile.SetProfilePicture", func(c *Client) { c.Profile.SetProfilePicture(ctx, "s1", SetProfilePictureRequest{}) }, "PUT", "/api/sessions/s1/profile/picture"},
+		{"Profile.DeleteProfilePicture", func(c *Client) { c.Profile.DeleteProfilePicture(ctx, "s1") }, "DELETE", "/api/sessions/s1/profile/picture"},
 
 		{"Calls.RejectCall", func(c *Client) { c.Calls.RejectCall(ctx, "s1", "call1") }, "POST", "/api/sessions/s1/calls/call1/reject"},
+		{"Calls.CreateLink", func(c *Client) { c.Calls.CreateLink(ctx, "s1", CreateCallLinkRequest{}) }, "POST", "/api/sessions/s1/calls/link"},
+	}
+
+	// Every exported method of every service must have a row, so a new method
+	// cannot ship without its route being asserted.
+	covered := map[string]bool{}
+	for _, tc := range cases {
+		covered[tc.name] = true
+	}
+	ct := reflect.TypeOf(Client{})
+	for i := 0; i < ct.NumField(); i++ {
+		f := ct.Field(i)
+		if !f.IsExported() || f.Type.Kind() != reflect.Pointer {
+			continue
+		}
+		for j := 0; j < f.Type.NumMethod(); j++ {
+			if name := f.Name + "." + f.Type.Method(j).Name; !covered[name] {
+				t.Errorf("%s has no TestRouting row", name)
+			}
+		}
 	}
 
 	for _, tc := range cases {

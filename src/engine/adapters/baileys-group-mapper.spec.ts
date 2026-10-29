@@ -1,5 +1,6 @@
 import type { GroupMetadata } from '@whiskeysockets/baileys';
-import { mapBaileysGroup, mapBaileysGroupInfo } from './baileys-group-mapper';
+import { findSelfParticipant, mapBaileysGroup, mapBaileysGroupInfo } from './baileys-group-mapper';
+const identity = (jid: string): string => jid;
 
 const meta = (over: Partial<GroupMetadata> = {}): GroupMetadata => ({
   id: '123-456@g.us',
@@ -43,6 +44,24 @@ describe('mapBaileysGroup', () => {
 });
 
 describe('mapBaileysGroupInfo', () => {
+  /**
+   * isAnnounce is the group SETTING; isReadOnly is what that setting means for THIS account, which
+   * is the field a client uses to disable its composer. Copying announce into both told an admin of
+   * an announce-only group that they could not post, while whatsapp-web.js reads WA Web's own
+   * per-account flag and says they can.
+   */
+  it('reads isReadOnly against the calling account, not the group setting', () => {
+    const announceOnly = meta({ announce: true });
+    // 628999 is a superadmin and 628222 an admin in the fixture; 628111 is a plain member.
+    expect(mapBaileysGroupInfo(announceOnly, identity, '628999@s.whatsapp.net').isReadOnly).toBe(false);
+    expect(mapBaileysGroupInfo(announceOnly, identity, '628222@s.whatsapp.net').isReadOnly).toBe(false);
+    expect(mapBaileysGroupInfo(announceOnly, identity, '628111@s.whatsapp.net').isReadOnly).toBe(true);
+    // The setting itself is unchanged for every caller.
+    expect(mapBaileysGroupInfo(announceOnly, identity, '628999@s.whatsapp.net').isAnnounce).toBe(true);
+    // An open group is writable for everyone, admin or not.
+    expect(mapBaileysGroupInfo(meta({ announce: false }), identity, '628111@s.whatsapp.net').isReadOnly).toBe(false);
+  });
+
   it('maps full info incl. participants admin/superadmin', () => {
     const info = mapBaileysGroupInfo(meta({ announce: true }));
     expect(info.id).toBe('123-456@g.us');
@@ -99,5 +118,31 @@ describe('mapBaileysGroupInfo', () => {
     // Self is reported in the raw protocol dialect; the normalizer folds both onto @c.us so they match.
     const normalize = (jid: string) => (jid === '111@lid' || jid === '628111@s.whatsapp.net' ? '628111@c.us' : jid);
     expect(mapBaileysGroup(m, '628111@s.whatsapp.net', normalize).isAdmin).toBe(true);
+  });
+});
+
+describe('findSelfParticipant across identity kinds', () => {
+  const phone = '628111';
+
+  it('does not take a lid member for the account because its digits match the phone number', () => {
+    const participants = [
+      { id: `${phone}@lid`, admin: 'admin' as const },
+      { id: `${phone}@s.whatsapp.net`, admin: null },
+    ];
+    const metadata = meta({ participants, announce: true });
+
+    expect(findSelfParticipant(metadata, `${phone}@s.whatsapp.net`, identity)).toBe(participants[1]);
+    expect(mapBaileysGroup(metadata, `${phone}@s.whatsapp.net`, identity).isAdmin).toBe(false);
+    expect(mapBaileysGroupInfo(metadata, identity, `${phone}@s.whatsapp.net`).isReadOnly).toBe(true);
+  });
+
+  it('does not take a phone member for the account when only its lid is known', () => {
+    const metadata = meta({ participants: [{ id: `${phone}@s.whatsapp.net`, admin: 'admin' }] });
+
+    expect(findSelfParticipant(metadata, `${phone}@lid`, identity)).toBeUndefined();
+  });
+
+  it('finds nothing for an account whose id is not known', () => {
+    expect(findSelfParticipant(meta({ participants: [{ id: '', admin: 'admin' }] }), '', identity)).toBeUndefined();
   });
 });
