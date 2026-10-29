@@ -1,5 +1,19 @@
 # 06 - API Specification
 
+## Maxtres: Dokploy notifications
+
+#### POST /api/integration/dokploy/:sessionId/:chatId
+
+Receives the unchanged Dokploy Custom JSON body and forwards a text notification
+to the WhatsApp group named by `chatId` (`@g.us`), using the session UUID in the URL.
+Requires an operator or admin API key authorized for that session. Required body
+fields are `title` and `message`; optional fields are `projectName`, `applicationName`,
+`applicationType`, `errorMessage`, `buildLink`, `timestamp`, `date`, `status`, and `type`.
+Unknown fields are rejected. Messages are capped at 4096 characters and retain the
+build link before truncated error details. Returns `201` with `MessageResponseDto`
+when submitted; validation, authentication, and send failures remain non-2xx.
+See [setup and rollback](maxtres-dokploy-notifications.md).
+
 ## 6.1 API Overview
 
 ### Base URL

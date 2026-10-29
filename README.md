@@ -272,6 +272,8 @@ docker compose --profile full up -d
 
 ## 📡 API Examples
 
+For Dokploy build-failure alerts, see [Dokploy notifications](docs/maxtres-dokploy-notifications.md).
+
 ### Create a Session
 
 ```bash

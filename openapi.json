@@ -2935,6 +2935,64 @@
         ]
       }
     },
+    "/api/integration/dokploy/{sessionId}/{chatId}": {
+      "post": {
+        "operationId": "DokployNotificationController_notify",
+        "parameters": [
+          {
+            "name": "chatId",
+            "required": true,
+            "in": "path",
+            "description": "Destination group ID, ending in @g.us",
+            "schema": {}
+          },
+          {
+            "name": "sessionId",
+            "required": true,
+            "in": "path",
+            "description": "ID of the connected WhatsApp session",
+            "schema": {
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DokployNotificationDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Notification submitted to WhatsApp",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid notification or destination, or session not active"
+          },
+          "409": {
+            "description": "WhatsApp session is not ready"
+          },
+          "503": {
+            "description": "WhatsApp is unavailable or sending is temporarily limited"
+          }
+        },
+        "summary": "Forward a Dokploy Custom notification to a WhatsApp group",
+        "tags": [
+          "integration"
+        ]
+      }
+    },
     "/api/sessions/{sessionId}/templates": {
       "post": {
         "operationId": "TemplateController_create",
@@ -8945,6 +9003,62 @@
           "status",
           "totalMessages",
           "statusUrl"
+        ]
+      },
+      "DokployNotificationDto": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "example": "Build Error",
+            "maxLength": 256
+          },
+          "message": {
+            "type": "string",
+            "example": "Build failed with errors",
+            "maxLength": 4096
+          },
+          "projectName": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "applicationName": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "applicationType": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "errorMessage": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "buildLink": {
+            "type": "string",
+            "example": "https://dokploy.example.com/dashboard/build/123",
+            "maxLength": 2048
+          },
+          "timestamp": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "date": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "type": {
+            "type": "string",
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "title",
+          "message"
         ]
       },
       "CreateTemplateDto": {

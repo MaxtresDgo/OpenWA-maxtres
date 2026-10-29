@@ -5,6 +5,7 @@ import { BulkMessageService } from './bulk-message.service';
 import { MessageTypeBackfillService } from './message-type-backfill.service';
 import { PendingMessageReaperService } from './pending-message-reaper.service';
 import { MessageController } from './message.controller';
+import { DokployNotificationController } from './dokploy-notification.controller';
 import { SessionModule } from '../session/session.module';
 import { TemplateModule } from '../template/template.module';
 import { ChatMediaModule } from '../chat-media/chat-media.module';
@@ -20,7 +21,7 @@ import { MessageBatch } from './entities/message-batch.entity';
     TemplateModule,
     ChatMediaModule,
   ],
-  controllers: [MessageController],
+  controllers: [MessageController, DokployNotificationController],
   providers: [
     MessageService,
     BulkMessageService,

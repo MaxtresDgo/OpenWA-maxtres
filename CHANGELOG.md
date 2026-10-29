@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Receive Dokploy Custom notifications at `POST /api/integration/dokploy/:sessionId/:chatId` and forward build details to a WhatsApp group using the existing operator authentication and session scope.
+
 - **A WhatsApp-initiated unlink now leaves a durable audit record** — the disconnect reason previously reached only the log, the webhook and the socket, so once the process restarted an unlink was indistinguishable over the API from an ordinary network drop; transient drops stay unaudited, so a reconnect storm still writes nothing.
 - **The Go SDK has its first semantic version, `sdk/go/v0.2.0`** — until now the module proxy only served pseudo-versions, so callers could not pin a release at all.
 - **`rmyndharis-openwa` 0.2.0 on PyPI** — the first release through the trusted-publishing workflow, carrying everything the Python SDK gained since 0.1.0 in June.
