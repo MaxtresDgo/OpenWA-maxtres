@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add the `MessageSearch` MCP tool, which runs the global message search for agents, with `match=contains` by default only when `SEARCH_CONTAINS_ENABLED=true` (#1899). Thanks @luisffm.
 - Add `PUT /api/sessions/{sessionId}/groups/{groupId}/member-label` to set this account's member label in a group on Baileys; whatsapp-web.js answers `501` (#1918). Thanks @xwork1 for the report.
 - Add `thumbnailUrl` and `thumbnailBase64` to `customLinkPreview` on Baileys, uploaded as the preview's high-quality thumbnail so WhatsApp renders the large card: base64 wins over the URL, the URL is fetched through the SSRF-guarded media loader, either is capped at 5 MiB and must be a readable image, and only a failed WhatsApp upload sends the preview without the image; the SDKs and the `MessageSendText` MCP tool accept both fields (#1917).
+- Add a warning log and a `phone_second_lid_reported` audit row, filed under the reporting session, when a session reports a privacy id the gateway did not hold, or held only outside its mapping cache, for a phone number the lid table already maps to another reported id.
+- Add a hint to the dashboard API Keys form that an `@lid` chat entry also admits the phone number mapped to it.
 
 ### Changed
 
@@ -26,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Show dashboard chat list times as the clock today, Yesterday, the weekday within the last week and a short date before that. Thanks @rjsebening.
 - Move the dashboard sidebar's collapse button from the sidebar edge into its header, beside the logo or under it when collapsed, with a panel icon mirrored for right-to-left languages. Thanks @rjsebening.
 - Offer Clear chat and Delete chat in the dashboard on Baileys sessions too, now that the phone applies both (#1891).
+- Show each audit row's message under its action on the dashboard Logs page.
 
 ### Fixed
 

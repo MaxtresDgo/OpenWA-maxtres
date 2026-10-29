@@ -361,6 +361,18 @@ test('the severity badge shows the translated severity', async () => {
   assert.deepEqual(badges, ['Info', 'Error']);
 });
 
+// A row's message is the only place some actions name what happened, such as the number and ids of a
+// phone_second_lid_reported row, so it is shown with the action rather than only searched and exported.
+test('a row shows its message under its action, and a row without one shows none', async () => {
+  const container = renderLogs();
+  const message = await rtl.screen.findByText('SESSION_STOP_INCOMPLETE');
+  assert.equal(message.closest('.action')?.firstChild?.textContent, 'session.stop');
+  const nullRow = [...container.querySelectorAll('.logs-table .action')].find(cell =>
+    cell.textContent?.startsWith('infra.restart'),
+  );
+  assert.equal(nullRow?.textContent, 'infra.restart');
+});
+
 test('the search matches errorMessage as well as action, whatever the case', async () => {
   const { screen, fireEvent, waitFor } = rtl;
   renderLogs();

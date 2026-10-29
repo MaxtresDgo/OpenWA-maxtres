@@ -127,6 +127,7 @@ function KeyLimitFields({
   // A datetime-local with a blank segment reports value '', like an empty field, so only badInput says
   // there are leftover segments to clear.
   const [partialExpiry, setPartialExpiry] = useState(false);
+  const lidHintId = normalizeChatScope(chats).some(entry => /@lid$/i.test(entry)) ? `${idPrefix}-chats-lid` : undefined;
   return (
     <>
       <label htmlFor={`${idPrefix}-ips`}>{t('apiKeys.ips.label')}</label>
@@ -153,6 +154,7 @@ function KeyLimitFields({
             spellCheck={false}
             value={chats}
             disabled={disabled}
+            aria-describedby={lidHintId}
             onChange={e => onChange({ chats: e.target.value })}
           />
           {errors.chat !== null && (
@@ -166,6 +168,11 @@ function KeyLimitFields({
             </span>
           )}
           <span className="key-field-hint">{t('apiKeys.chats.hint')}</span>
+          {lidHintId && (
+            <span id={lidHintId} className="key-field-hint">
+              {t('apiKeys.chats.lidHint')}
+            </span>
+          )}
         </>
       )}
       <label htmlFor={`${idPrefix}-expires`}>{t('apiKeys.expiry.label')}</label>

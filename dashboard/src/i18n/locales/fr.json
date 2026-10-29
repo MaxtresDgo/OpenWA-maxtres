@@ -866,6 +866,7 @@
     "chats": {
       "label": "Accès aux discussions (facultatif)",
       "hint": "Une discussion par ligne : un ID de groupe se terminant par @g.us, un ID de contact se terminant par @c.us ou @lid, ou un numéro de téléphone. Laissez vide pour toutes les discussions. Une clé limitée à des discussions ne peut utiliser que les routes ouvertes à ce type de clé ; son accès par le WebSocket des événements et MCP reste limité à ces discussions.",
+      "lidHint": "Une entrée @lid admet aussi le numéro de téléphone qui lui est actuellement associé. Si ce numéro passe à quelqu'un d'autre, cette clé peut l'atteindre : vérifiez la clé quand un contact change de numéro.",
       "invalid": "Ni un ID de discussion ni un numéro de téléphone : {{value}}",
       "tooMany": "Trop de discussions ({{count}}) : une clé peut en lister au plus {{max}}."
     },
