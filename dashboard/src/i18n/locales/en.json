@@ -860,6 +860,7 @@
     "chats": {
       "label": "Chat access (optional)",
       "hint": "One chat per line: a group ID ending in @g.us, a contact ID ending in @c.us or @lid, or a phone number. Leave empty for every chat. A chat-restricted key can use only the routes open to chat-scoped keys; its events WebSocket and MCP access stay within these chats.",
+      "lidHint": "An @lid entry also admits the phone number currently mapped to it. If that number passes to someone else, this key can reach them: review the key when a contact changes number.",
       "invalid": "Not a chat ID or phone number: {{value}}",
       "tooMany": "Too many chats ({{count}}): a key may list at most {{max}}."
     },

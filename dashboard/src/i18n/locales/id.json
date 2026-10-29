@@ -860,6 +860,7 @@
     "chats": {
       "label": "Akses obrolan (opsional)",
       "hint": "Satu obrolan per baris: ID grup yang diakhiri @g.us, ID kontak yang diakhiri @c.us atau @lid, atau nomor telepon. Kosongkan untuk semua obrolan. Kunci yang dibatasi obrolan hanya dapat menggunakan rute yang terbuka untuk kunci dengan cakupan obrolan; akses lewat WebSocket kejadian dan MCP tetap terbatas pada obrolan tersebut.",
+      "lidHint": "Entri @lid juga mengizinkan nomor telepon yang saat ini dipetakan ke sana. Jika nomor itu berpindah ke orang lain, kunci ini dapat menjangkau mereka: tinjau kunci ini saat kontak berganti nomor.",
       "invalid": "Bukan ID obrolan atau nomor telepon: {{value}}",
       "tooMany": "Terlalu banyak obrolan ({{count}}): satu kunci paling banyak memuat {{max}}."
     },
