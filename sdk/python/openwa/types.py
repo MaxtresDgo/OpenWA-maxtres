@@ -218,12 +218,17 @@ class GroupJoinInfo(TypedDict):
 
 
 class CustomLinkPreview(TypedDict):
-    """A caller-supplied link preview. Nothing is fetched for these."""
+    """A caller-supplied link preview. The page is not fetched; only thumbnailUrl, when given, is."""
 
     url: str
     # Required -- WhatsApp will not render a preview without a title.
     title: str
     description: NotRequired[str]
+    # Preview image as an http(s) URL, fetched under the media SSRF rules; renders the large card.
+    # At most 5 MiB.
+    thumbnailUrl: NotRequired[str]
+    # Preview image as base64, at most 5 MiB decoded. Wins over thumbnailUrl.
+    thumbnailBase64: NotRequired[str]
 
 
 # ── Session ───────────────────────────────────────────────────────

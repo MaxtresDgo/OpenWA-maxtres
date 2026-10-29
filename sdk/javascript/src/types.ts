@@ -261,11 +261,19 @@ export interface SendTextRequest {
    */
   linkPreview?: boolean;
   /**
-   * Attach a preview you supply yourself instead of one fetched from the URL. Nothing is fetched, so
-   * this works even for a URL the gateway cannot reach. **Baileys only** — whatsapp-web.js takes a
-   * boolean and answers 501. Cannot be combined with `linkPreview: false`.
+   * Attach a preview you supply yourself instead of one fetched from the URL. The page is not
+   * fetched, so this works even for a URL the gateway cannot reach. `thumbnailUrl` (fetched under the
+   * media SSRF rules) or `thumbnailBase64` (wins when both are set) adds an image, at most 5 MiB,
+   * rendered as the large card. **Baileys only** — whatsapp-web.js takes a boolean and answers 501.
+   * Cannot be combined with `linkPreview: false`.
    */
-  customLinkPreview?: { url: string; title: string; description?: string };
+  customLinkPreview?: {
+    url: string;
+    title: string;
+    description?: string;
+    thumbnailUrl?: string;
+    thumbnailBase64?: string;
+  };
   /**
    * Quote an earlier message, turning this send into a reply. Engine-specific: whatsapp-web.js
    * matches the serialized message id, Baileys the raw message key id of a message it has already

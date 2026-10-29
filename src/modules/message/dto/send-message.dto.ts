@@ -108,6 +108,26 @@ export class CustomLinkPreviewDto {
   @IsString()
   @MaxLength(CUSTOM_PREVIEW_DESCRIPTION_MAX_LENGTH)
   description?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Preview image URL (http/https), fetched by the gateway under the same SSRF rules as a media URL. ' +
+      'Rendered as the large preview card. At most 5 MiB.',
+    example: 'https://example.com/launch.jpg',
+  })
+  @IsOptional()
+  // base64 wins when it holds data, as on the media routes, so a url next to it is not fetched and not checked.
+  @IsMediaUrl<CustomLinkPreviewDto>({ ignoreWhen: o => !!stripBase64DataUri(o.thumbnailBase64) })
+  thumbnailUrl?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Preview image as base64, with or without a data: prefix. Wins over thumbnailUrl. At most 5 MiB decoded.',
+  })
+  @IsOptional()
+  @ToStrictString()
+  @IsString()
+  thumbnailBase64?: string;
 }
 
 export class SendTextMessageDto {

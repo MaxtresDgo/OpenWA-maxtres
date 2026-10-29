@@ -20371,6 +20371,15 @@
             "description": "Preview description",
             "example": "Read the announcement.",
             "maxLength": 1024
+          },
+          "thumbnailUrl": {
+            "type": "string",
+            "description": "Preview image URL (http/https), fetched by the gateway under the same SSRF rules as a media URL. Rendered as the large preview card. At most 5 MiB.",
+            "example": "https://example.com/launch.jpg"
+          },
+          "thumbnailBase64": {
+            "type": "string",
+            "description": "Preview image as base64, with or without a data: prefix. Wins over thumbnailUrl. At most 5 MiB decoded."
           }
         },
         "required": [

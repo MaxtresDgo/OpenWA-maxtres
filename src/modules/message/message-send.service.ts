@@ -9,8 +9,15 @@ import { MessageProjector } from '../session/message-projector.service';
 import { EngineRegistry } from '../../engine/engine-registry.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
-import { resolveMediaBody } from './media-cap.util';
-import { MediaInput, IWhatsAppEngine, MessageResult } from '../../engine/interfaces/whatsapp-engine.interface';
+import { assertBase64WithinMediaCap, resolveMediaBody, stripBase64DataUri } from './media-cap.util';
+import { LINK_PREVIEW_THUMBNAIL_MAX_BYTES } from '../../common/media/load-remote-media';
+import { isMediaUrl, MEDIA_URL_MESSAGE } from '../../common/media/media-url';
+import {
+  CustomLinkPreview,
+  MediaInput,
+  IWhatsAppEngine,
+  MessageResult,
+} from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { HookManager, applySendingGate } from '../../core/hooks';
 import { SendPacingService, SettleAdmission, countsTowardSendBreaker } from './send-pacing.service';
@@ -110,12 +117,23 @@ export class MessageSendService {
     if (dto.linkPreview === false && dto.customLinkPreview) {
       throw new BadRequestException('linkPreview: false cannot be combined with customLinkPreview');
     }
-    const { message, finalDto, engine } = await this.applySendingGate(sessionId, 'text', dto, finalDto => ({
-      chatId: finalDto.chatId,
-      body: finalDto.text,
-      type: 'text',
-      quotedMessageId: finalDto.quotedMessageId,
-    }));
+    const {
+      message,
+      finalDto,
+      engine,
+      prepared: customPreview,
+    } = await this.applySendingGate(
+      sessionId,
+      'text',
+      dto,
+      finalDto => ({
+        chatId: finalDto.chatId,
+        body: finalDto.text,
+        type: 'text',
+        quotedMessageId: finalDto.quotedMessageId,
+      }),
+      (d: SendTextMessageDto) => this.buildCustomPreview(d.customLinkPreview),
+    );
 
     // Humanising "typing…" pause before the actual send (anti-automation signal). On by default;
     // SIMULATE_TYPING=false disables it.
@@ -127,11 +145,11 @@ export class MessageSendService {
       // nor a preview choice keeps its two-argument shape, and one with mentions alone keeps its
       // three — trailing `undefined`s would be harmless to the engines but would rewrite the call
       // shape of every existing send for no behavioural gain.
-      const { linkPreview, customLinkPreview, quotedMessageId } = finalDto;
-      if (linkPreview !== undefined || customLinkPreview || quotedMessageId) {
+      const { linkPreview, quotedMessageId } = finalDto;
+      if (linkPreview !== undefined || customPreview || quotedMessageId) {
         result = await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions, {
           ...(linkPreview === undefined ? {} : { linkPreview }),
-          ...(customLinkPreview ? { customPreview: customLinkPreview } : {}),
+          ...(customPreview ? { customPreview } : {}),
           ...(quotedMessageId ? { quotedMessageId } : {}),
         });
       } else if (finalDto.mentions?.length) {
@@ -1042,5 +1060,28 @@ export class MessageSendService {
       mentions: dto.mentions,
       quotedMessageId: dto.quotedMessageId,
     };
+  }
+
+  /**
+   * The custom preview the engine is handed. Its image is checked here, before the PENDING row, as a
+   * media body is: base64 loses a data: prefix and wins over a URL, an oversized one is a 413, and a URL
+   * that is not http(s) is a 400. The MCP tool reaches this without the ValidationPipe, so the DTO's
+   * rules alone would not hold there.
+   */
+  private buildCustomPreview(preview: SendTextMessageDto['customLinkPreview']): CustomLinkPreview | undefined {
+    if (!preview) return undefined;
+    const { thumbnailUrl, thumbnailBase64, ...metadata } = preview;
+    const base64 = stripBase64DataUri(thumbnailBase64);
+    if (base64) {
+      assertBase64WithinMediaCap(base64, LINK_PREVIEW_THUMBNAIL_MAX_BYTES);
+      return { ...metadata, thumbnailBase64: base64 };
+    }
+    if (thumbnailUrl !== undefined) {
+      if (!isMediaUrl(thumbnailUrl)) {
+        throw new BadRequestException(`customLinkPreview.thumbnailUrl: ${MEDIA_URL_MESSAGE}`);
+      }
+      return { ...metadata, thumbnailUrl };
+    }
+    return metadata;
   }
 }

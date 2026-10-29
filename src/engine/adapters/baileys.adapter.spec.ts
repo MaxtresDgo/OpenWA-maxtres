@@ -17,6 +17,7 @@ import { ChatState } from './baileys-chat-state.entity';
 import { ChatStateStoreService } from './baileys-chat-state-store.service';
 
 jest.mock('../../common/media/load-remote-media', () => ({
+  ...jest.requireActual<object>('../../common/media/load-remote-media'),
   loadRemoteMediaBuffer: jest.fn(),
 }));
 
@@ -99,6 +100,7 @@ class FakeSock extends EventEmitter {
   // mirrors that: resolving alone proves nothing reached the adapter.
   public fetchAccountReachoutTimelock = jest.fn().mockResolvedValue({ isActive: false });
   public resyncAppState = jest.fn().mockResolvedValue(undefined);
+  public waUploadToServer = jest.fn();
   public authState = {
     creds: { accountSyncCounter: 0 },
     keys: { set: jest.fn().mockResolvedValue(undefined) },
@@ -178,6 +180,8 @@ jest.mock('@whiskeysockets/baileys', () => ({
       },
     }),
   ),
+  // A custom preview's image is uploaded through this; the preview tests set what it resolves.
+  prepareWAMessageMedia: jest.fn(),
   // Identity passthrough by default; individual tests may override to simulate unwrapping.
   normalizeMessageContent: jest.fn((c: unknown) => c),
   extractMessageContent: jest.fn((c: unknown) => c),
@@ -9931,6 +9935,110 @@ describe('BaileysAdapter custom link preview', () => {
     });
 
     expect(sentContent().linkPreview).not.toHaveProperty('description');
+  });
+
+  describe('with an image', () => {
+    const prepareWAMessageMedia = (): jest.Mock =>
+      jest.requireMock<{ prepareWAMessageMedia: jest.Mock }>('@whiskeysockets/baileys').prepareWAMessageMedia;
+    const uploaded = { url: 'https://mmg.whatsapp.net/t', jpegThumbnail: new Uint8Array([1, 2]) };
+
+    beforeEach(() => {
+      prepareWAMessageMedia().mockResolvedValue({ imageMessage: uploaded });
+    });
+
+    it('uploads base64 bytes as the high-quality link thumbnail', async () => {
+      const adapter = await readyAdapter();
+
+      await adapter.sendTextMessage('628111@c.us', 'see https://example.com', undefined, {
+        customPreview: { url: 'https://example.com', title: 'Example', thumbnailBase64: PNG_BYTES.toString('base64') },
+      });
+
+      expect(prepareWAMessageMedia()).toHaveBeenCalledWith(
+        { image: PNG_BYTES },
+        { upload: fakeSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+      );
+      expect(sentContent().linkPreview).toMatchObject({
+        title: 'Example',
+        jpegThumbnail: Buffer.from([1, 2]),
+        highQualityThumbnail: uploaded,
+      });
+      expect(loadRemoteMediaBuffer).not.toHaveBeenCalled();
+    });
+
+    // Baileys would fetch a URL with its own unguarded client, so only bytes reach it.
+    it('fetches a URL through the guarded loader with the thumbnail cap', async () => {
+      (loadRemoteMediaBuffer as jest.Mock).mockResolvedValueOnce({ data: PNG_BYTES, mimetype: 'image/png' });
+      const adapter = await readyAdapter();
+
+      await adapter.sendTextMessage('628111@c.us', 'x', undefined, {
+        customPreview: { url: 'https://example.com', title: 'Example', thumbnailUrl: 'https://cdn.example/a.png' },
+      });
+
+      expect(loadRemoteMediaBuffer).toHaveBeenCalledWith('https://cdn.example/a.png', undefined, {
+        maxBytes: 5 * 1024 * 1024,
+      });
+      expect(prepareWAMessageMedia()).toHaveBeenCalledWith({ image: PNG_BYTES }, expect.anything());
+    });
+
+    it('prefers base64 over a URL, as the media routes do', async () => {
+      const adapter = await readyAdapter();
+
+      await adapter.sendTextMessage('628111@c.us', 'x', undefined, {
+        customPreview: {
+          url: 'https://example.com',
+          title: 'Example',
+          thumbnailUrl: 'https://cdn.example/a.png',
+          thumbnailBase64: PNG_BYTES.toString('base64'),
+        },
+      });
+
+      expect(loadRemoteMediaBuffer).not.toHaveBeenCalled();
+      expect(prepareWAMessageMedia()).toHaveBeenCalledWith({ image: PNG_BYTES }, expect.anything());
+    });
+
+    // Swallowing a refused fetch would hide a missing SSRF_ALLOWED_HOSTS entry behind a 200.
+    it('fails the send when the image cannot be fetched', async () => {
+      (loadRemoteMediaBuffer as jest.Mock).mockRejectedValueOnce(new BadRequestException('Media fetch failed'));
+      const adapter = await readyAdapter();
+
+      await expect(
+        adapter.sendTextMessage('628111@c.us', 'x', undefined, {
+          customPreview: { url: 'https://example.com', title: 'Example', thumbnailUrl: 'https://cdn.example/a.png' },
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(fakeSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('refuses bytes that are no readable image with a 400 and sends nothing', async () => {
+      const adapter = await readyAdapter();
+
+      await expect(
+        adapter.sendTextMessage('628111@c.us', 'x', undefined, {
+          customPreview: {
+            url: 'https://example.com',
+            title: 'Example',
+            thumbnailBase64: SVG_BYTES.toString('base64'),
+          },
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prepareWAMessageMedia()).not.toHaveBeenCalled();
+      expect(fakeSock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('sends the preview without the image when the WhatsApp upload fails', async () => {
+      prepareWAMessageMedia().mockRejectedValueOnce(new Error('upload failed'));
+      const adapter = await readyAdapter();
+
+      await adapter.sendTextMessage('628111@c.us', 'x', undefined, {
+        customPreview: { url: 'https://example.com', title: 'Example', thumbnailBase64: PNG_BYTES.toString('base64') },
+      });
+
+      expect(sentContent().linkPreview).toEqual({
+        'matched-text': 'https://example.com',
+        'canonical-url': 'https://example.com',
+        title: 'Example',
+      });
+    });
   });
 });
 

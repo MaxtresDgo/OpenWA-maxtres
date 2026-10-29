@@ -374,8 +374,8 @@ export interface GroupMembershipRequest {
 /**
  * A caller-supplied link preview, used instead of fetching one.
  *
- * Nothing is fetched for these: the caller states the metadata, so the gateway makes no outbound
- * request at all — which also means a preview can be attached for a URL this server could not reach.
+ * The page at `url` is never fetched: the caller states the metadata, so a preview can be attached for
+ * a URL this server could not reach. The only outbound request is for `thumbnailUrl`, when given.
  */
 export interface CustomLinkPreview {
   /** The URL as it appears in the message text; WhatsApp anchors the preview to it. */
@@ -383,6 +383,13 @@ export interface CustomLinkPreview {
   /** Required — WhatsApp will not render a preview without one. */
   title: string;
   description?: string;
+  /**
+   * Preview image as an http(s) URL, fetched through the SSRF-guarded media loader. Baileys uploads it
+   * as the high-quality link thumbnail, which renders the large preview card.
+   */
+  thumbnailUrl?: string;
+  /** Preview image as base64. Wins over `thumbnailUrl` when both are present, as on the media routes. */
+  thumbnailBase64?: string;
 }
 
 export interface ContactCard extends Quotable {

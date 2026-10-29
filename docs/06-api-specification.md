@@ -1787,14 +1787,14 @@ Send a plain text message.
 
 **Request body** — `SendTextMessageDto`
 
-| Field             | Type     | Required | Constraints                              | Description                                                                                  |
-| ----------------- | -------- | -------- | ---------------------------------------- | -------------------------------------------------------------------------------------------- |
-| chatId            | string   | Yes      | non-empty, max 255, `localpart@host`     | `phone@c.us` or `groupId@g.us`                                                               |
-| text              | string   | Yes      | non-empty, max 4096                      | Message text                                                                                 |
-| mentions          | string[] | No       | array of WIDs, max 1024 of 64 characters | WIDs to @mention (e.g. `["62811@c.us"]`). See **Mentions** below                             |
-| linkPreview       | boolean  | No       | —                                        | `false` suppresses it; on Baileys `true` is required to get one. See **Link previews** below |
-| customLinkPreview | object   | No       | `{ url, title, description? }`           | Attach a preview you supply. **Baileys only.** See **Link previews** below                   |
-| quotedMessageId   | string   | No       | non-empty                                | Quote an earlier message, making this a reply. See [Quoted sends](#quoted-sends) below       |
+| Field             | Type     | Required | Constraints                                                     | Description                                                                                  |
+| ----------------- | -------- | -------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| chatId            | string   | Yes      | non-empty, max 255, `localpart@host`                            | `phone@c.us` or `groupId@g.us`                                                               |
+| text              | string   | Yes      | non-empty, max 4096                                             | Message text                                                                                 |
+| mentions          | string[] | No       | array of WIDs, max 1024 of 64 characters                        | WIDs to @mention (e.g. `["62811@c.us"]`). See **Mentions** below                             |
+| linkPreview       | boolean  | No       | —                                                               | `false` suppresses it; on Baileys `true` is required to get one. See **Link previews** below |
+| customLinkPreview | object   | No       | `{ url, title, description?, thumbnailUrl?, thumbnailBase64? }` | Attach a preview you supply. **Baileys only.** See **Link previews** below                   |
+| quotedMessageId   | string   | No       | non-empty                                                       | Quote an earlier message, making this a reply. See [Quoted sends](#quoted-sends) below       |
 
 ```json
 { "chatId": "628123456789@c.us", "text": "Hello from OpenWA!" }
@@ -1814,7 +1814,7 @@ the message can go out — so there a preview is **opt-in**:
 | `linkPreview: false` | no preview                                                            | no preview                                         |
 | unset                | asks WhatsApp Web to build a preview in-page                          | no preview                                         |
 | `linkPreview: true`  | asks WhatsApp Web to build a preview in-page                          | the gateway fetches the page itself and builds one |
-| `customLinkPreview`  | `501` — the library takes a boolean only, with no way to pass a title | preview attached verbatim, nothing fetched         |
+| `customLinkPreview`  | `501` — the library takes a boolean only, with no way to pass a title | preview attached verbatim, the page not fetched    |
 
 **How Baileys previews are generated.** Not with the library's own generator. That one delegates to
 `link-preview-js`, which carries an unfixed SSRF advisory
@@ -1829,9 +1829,31 @@ an HTTP or HTTPS session proxy the proxy resolves the name, so that window stays
 that intentionally allows an internal host lists it in `SSRF_ALLOWED_HOSTS`. A refused, slow or broken site
 yields no preview — never a failed send.
 
-`customLinkPreview` fetches **nothing at all**, so it works for URLs this server cannot reach, and it
+`customLinkPreview` never fetches the page, so it works for URLs this server cannot reach, and it
 cannot be combined with `linkPreview: false` — that asks for the opposite, and the request is
 rejected with `400` rather than guessing which half was meant.
+
+A custom preview can carry an image, which WhatsApp renders as the large card above the text:
+`thumbnailBase64`, or `thumbnailUrl`, which is the only thing a custom preview fetches. As on the media
+routes, base64 wins when both are present. The URL goes through the same SSRF-guarded loader as a
+media URL (`SSRF_ALLOWED_HOSTS`, the session proxy, no redirects), and either form is capped at 5 MiB
+(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The gateway uploads the bytes to WhatsApp as the preview's
+high-quality thumbnail; Baileys is never handed the URL. A refused host or a failed fetch answers
+`400`, an image over the cap `413`, and bytes that are not a readable image (SVG included) `400`, as on
+`send-image`. Only a failed upload to WhatsApp sends the text with the preview but without the image,
+with a warning in the log.
+
+```json
+{
+  "chatId": "628123456789@c.us",
+  "text": "We just launched https://example.com/launch",
+  "customLinkPreview": {
+    "url": "https://example.com/launch",
+    "title": "We just launched",
+    "thumbnailUrl": "https://example.com/launch.jpg"
+  }
+}
+```
 
 > whatsapp-web.js's own documentation notes the flag "has no effect on multi-device accounts". Its
 > code does act on the flag, but that caveat is upstream's and is repeated here rather than

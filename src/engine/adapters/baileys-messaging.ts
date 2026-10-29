@@ -34,7 +34,7 @@ import {
   setBaileysText,
   storedKeyInChatPersisted,
 } from './baileys-message-mapper';
-import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
+import { LINK_PREVIEW_THUMBNAIL_MAX_BYTES, loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
 import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { EngineNotReadyError } from '../../common/errors/engine-not-ready.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
@@ -319,6 +319,50 @@ export class BaileysMessaging {
     return socket;
   }
 
+  /**
+   * The thumbnail fields of a custom preview that carries an image. The bytes come from the caller's
+   * base64 or from the SSRF-guarded loader with a thumbnail-sized cap, never as a URL handed to
+   * Baileys, which would fetch it with its own unguarded client. Uploading them as a 'thumbnail-link'
+   * is what Baileys' own preview generator does, and the uploaded `highQualityThumbnail` is what
+   * WhatsApp renders as the large card.
+   *
+   * A refused host, a failed fetch, an oversized body or bytes that are no image throw, as they do on
+   * send-image: swallowing them would hide a missing SSRF_ALLOWED_HOSTS entry behind a 200. Only a
+   * failed WhatsApp upload sends the text without the image, with a warning in the log.
+   */
+  private async previewThumbnail(
+    preview: CustomLinkPreview,
+  ): Promise<{ jpegThumbnail?: Buffer; highQualityThumbnail?: BaileysLib.proto.Message.IImageMessage }> {
+    let data: Buffer;
+    if (preview.thumbnailBase64) {
+      data = Buffer.from(preview.thumbnailBase64, 'base64');
+    } else if (preview.thumbnailUrl) {
+      ({ data } = await loadRemoteMediaBuffer(preview.thumbnailUrl, this.host.sessionProxyUrl(), {
+        maxBytes: LINK_PREVIEW_THUMBNAIL_MAX_BYTES,
+      }));
+    } else {
+      return {};
+    }
+    await assertReadableImage(data);
+    const lib = await this.host.loadLib();
+    try {
+      const { imageMessage } = await lib.prepareWAMessageMedia(
+        { image: data },
+        { upload: this.sock().waUploadToServer, mediaTypeOverride: 'thumbnail-link' },
+      );
+      if (!imageMessage) return {};
+      return {
+        ...(imageMessage.jpegThumbnail ? { jpegThumbnail: Buffer.from(imageMessage.jpegThumbnail) } : {}),
+        highQualityThumbnail: imageMessage,
+      };
+    } catch (error) {
+      this.host.logger.warn('Link preview image upload failed; sending the preview without it', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {};
+    }
+  }
+
   async sendTextMessage(
     chatId: string,
     text: string,
@@ -352,7 +396,8 @@ export class BaileysMessaging {
       ...this.withMentions(mentions),
       ...(sendOptions?.linkPreview === true ? {} : { linkPreview: null }),
       // A caller-supplied preview short-circuits generation entirely: with the key present Baileys
-      // never calls getUrlInfo, so nothing is fetched and the metadata is used verbatim.
+      // never calls getUrlInfo, so the page is not fetched and the metadata is used verbatim. Its
+      // image, when one is given, is fetched and uploaded by previewThumbnail.
       ...(sendOptions?.customPreview
         ? {
             linkPreview: {
@@ -360,6 +405,7 @@ export class BaileysMessaging {
               'canonical-url': sendOptions.customPreview.url,
               title: sendOptions.customPreview.title,
               ...(sendOptions.customPreview.description ? { description: sendOptions.customPreview.description } : {}),
+              ...(await this.previewThumbnail(sendOptions.customPreview)),
             },
           }
         : {}),
