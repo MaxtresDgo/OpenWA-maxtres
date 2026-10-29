@@ -178,7 +178,7 @@ A document sent without a `filename` is delivered under the default name `file` 
 
 ### Size Limit
 
-There is a **single shared media byte cap**, not a per-type table. A base64 (or downloaded) media blob whose **decoded** size exceeds the cap is rejected with `413 Payload Too Large`. The cap is `MEDIA_DOWNLOAD_MAX_BYTES`, default **50 MiB (52,428,800 bytes)**; the same value bounds outbound base64 sends, remote-URL downloads, and inbound media. It takes a raw byte count, not a unit string, and the gateway refuses to boot on a non-positive or non-numeric value rather than falling back silently (`50mb` would parse to 50 bytes).
+Every media send shares **one media byte cap**, not a per-type table. A base64 (or downloaded) media blob whose **decoded** size exceeds the cap is rejected with `413 Payload Too Large`. The cap is `MEDIA_DOWNLOAD_MAX_BYTES`, default **50 MiB (52,428,800 bytes)**; the same value bounds outbound base64 sends, remote-URL downloads, and inbound media. It takes a raw byte count, not a unit string, and the gateway refuses to boot on a non-positive or non-numeric value rather than falling back silently (`50mb` would parse to 50 bytes). One field has a tighter cap of its own: a `customLinkPreview` image on `send-text`, at 5 MiB or the media cap if that is lower (see **Link previews** under `send-text`).
 
 A whole request body is separately capped by `BODY_SIZE_LIMIT` (`25mb` by default), and base64 is about a third larger than the bytes it encodes, so with default settings a base64 send above roughly 18 MiB decoded is rejected with `413` by the body parser before the media cap applies. Raise `BODY_SIZE_LIMIT` to send larger base64 media, or send it by `url`.
 
@@ -1837,11 +1837,13 @@ A custom preview can carry an image, which WhatsApp renders as the large card ab
 `thumbnailBase64`, or `thumbnailUrl`, which is the only thing a custom preview fetches. As on the media
 routes, base64 wins when both are present. The URL goes through the same SSRF-guarded loader as a
 media URL (`SSRF_ALLOWED_HOSTS`, the session proxy, no redirects), and either form is capped at 5 MiB
-(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The gateway uploads the bytes to WhatsApp as the preview's
-high-quality thumbnail; Baileys is never handed the URL. A refused host or a failed fetch answers
-`400`, an image over the cap `413`, and bytes that are not a readable image (SVG included) `400`, as on
-`send-image`. Only a failed upload to WhatsApp sends the text with the preview but without the image,
-with a warning in the log.
+(or `MEDIA_DOWNLOAD_MAX_BYTES`, if lower). The gateway re-encodes the image as a JPEG fitted inside
+1280x1280 (never enlarged, turned upright by its EXIF orientation, transparency made white) and uploads
+that to WhatsApp as the preview's high-quality thumbnail; Baileys is never handed the URL. A refused
+host or a failed fetch answers `400` (`503` when a fetch through the session's egress proxy fails before
+any response), an image over the cap `413`, and bytes that do not decode as an image (SVG, a truncated
+or corrupt file) `400`. Only a failed upload to WhatsApp sends the text with the preview but without
+the image, with a warning in the log.
 
 ```json
 {

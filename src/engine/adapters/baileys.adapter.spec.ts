@@ -9893,7 +9893,7 @@ describe('BaileysAdapter link preview', () => {
 });
 
 // A caller-supplied preview short-circuits generation: with the key present Baileys never calls
-// getUrlInfo, so nothing is fetched and a preview can be attached for a URL this server cannot reach.
+// getUrlInfo, so the page is not fetched and a preview can be attached for a URL this server cannot reach.
 describe('BaileysAdapter custom link preview', () => {
   beforeEach(() => {
     fakeSock.user = undefined;

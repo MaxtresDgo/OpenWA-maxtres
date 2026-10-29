@@ -188,8 +188,9 @@ export class SendTextMessageDto {
   @ApiPropertyOptional({
     type: CustomLinkPreviewDto,
     description:
-      'Attach a preview you supply yourself, instead of one fetched from the URL. Nothing is ' +
-      'fetched for these, so a preview can be attached even for a URL this server cannot reach. ' +
+      'Attach a preview you supply yourself, instead of one fetched from the URL. The page at `url` ' +
+      'is never fetched, so a preview can be attached even for a URL this server cannot reach; only ' +
+      'a `thumbnailUrl`, when given, is. ' +
       '**Baileys only** — whatsapp-web.js takes a boolean and answers `501`. Cannot be combined ' +
       'with `linkPreview: false`, which asks for the opposite.',
   })
