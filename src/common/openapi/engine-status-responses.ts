@@ -166,6 +166,21 @@ export const CUSTOM_LINK_PREVIEW_501 =
   'Baileys can attach one. The send itself is supported on both; omit the field, or use `linkPreview`.';
 
 /**
+ * send-text's 413: a custom preview's image has its own cap, `LINK_PREVIEW_THUMBNAIL_MAX_BYTES`, far
+ * below the 50 MiB media cap that MEDIA_TOO_LARGE_413 names.
+ */
+export const PREVIEW_IMAGE_TOO_LARGE_413 =
+  'The `customLinkPreview` image, as decoded `thumbnailBase64` or as downloaded from `thumbnailUrl`, ' +
+  'exceeds 5 MiB (or `MEDIA_DOWNLOAD_MAX_BYTES`, if that is lower).';
+
+/** MEDIA_URL_PROXY_503 for send-text, whose only fetched URL is a custom preview's `thumbnailUrl`. */
+export const PREVIEW_IMAGE_PROXY_503 =
+  'The session routes its URL fetches through an egress proxy, and the `customLinkPreview.thumbnailUrl` ' +
+  'fetch failed or timed out before any response arrived, so nothing was sent. The proxy or the target ' +
+  'behind it may be at fault; the gateway cannot tell which. Without a session proxy the same failure ' +
+  'answers `400`.';
+
+/**
  * `GroupNotFoundError` (404) — the id names a group, but no such group is known.
  *
  * It does NOT cover an id that addresses a 1:1 chat: every route carrying this response guards the

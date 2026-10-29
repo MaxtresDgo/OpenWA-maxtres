@@ -4532,6 +4532,16 @@
               }
             }
           },
+          "413": {
+            "description": "The `customLinkPreview` image, as decoded `thumbnailBase64` or as downloaded from `thumbnailUrl`, exceeds 5 MiB (or `MEDIA_DOWNLOAD_MAX_BYTES`, if that is lower).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "422": {
             "description": "`IDEMPOTENCY_KEY_REUSED`: the Idempotency-Key was already used with a different route or body.",
             "content": {
@@ -4553,7 +4563,7 @@
             }
           },
           "503": {
-            "description": "Baileys could not complete the recipient lookup within the request budget. On send routes, no message was handed to WhatsApp for this lookup failure. On Baileys, also when WhatsApp rate-limits the request (code 429: nothing was sent, and a keyed send frees its `Idempotency-Key`), times out a query it awaits (code 408: the outcome is not proven, and a keyed send keeps its `Idempotency-Key` taken), or the connection closes before the message is written (nothing was sent, and a keyed send frees its `Idempotency-Key`).",
+            "description": "The session routes its URL fetches through an egress proxy, and the `customLinkPreview.thumbnailUrl` fetch failed or timed out before any response arrived, so nothing was sent. The proxy or the target behind it may be at fault; the gateway cannot tell which. Without a session proxy the same failure answers `400`. Baileys could not complete the recipient lookup within the request budget. On send routes, no message was handed to WhatsApp for this lookup failure. On Baileys, also when WhatsApp rate-limits the request (code 429: nothing was sent, and a keyed send frees its `Idempotency-Key`), times out a query it awaits (code 408: the outcome is not proven, and a keyed send keeps its `Idempotency-Key` taken), or the connection closes before the message is written (nothing was sent, and a keyed send frees its `Idempotency-Key`).",
             "content": {
               "application/json": {
                 "schema": {

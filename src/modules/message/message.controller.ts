@@ -60,6 +60,8 @@ import {
   BULK_MEDIA_TOO_LARGE_413,
   MEDIA_URL_PROXY_503,
   MESSAGE_NOT_FOUND_404,
+  PREVIEW_IMAGE_PROXY_503,
+  PREVIEW_IMAGE_TOO_LARGE_413,
   QUOTED_MESSAGE_NOT_FOUND_404,
   RECIPIENT_UNREACHABLE_400,
   SEND_503,
@@ -220,7 +222,8 @@ export class MessageController {
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   @ApiResponse({ status: 404, description: QUOTED_MESSAGE_NOT_FOUND_404 })
   @ApiResponse({ status: 501, description: `${CUSTOM_LINK_PREVIEW_501} ${QUOTED_SEND_501}` })
-  @ApiResponse({ status: 503, description: SEND_503 })
+  @ApiResponse({ status: 413, description: PREVIEW_IMAGE_TOO_LARGE_413 })
+  @ApiResponse({ status: 503, description: `${PREVIEW_IMAGE_PROXY_503} ${SEND_503}` })
   async sendText(@Param('sessionId') sessionId: string, @Body() dto: SendTextMessageDto): Promise<MessageResponseDto> {
     return this.messageService.sendText(sessionId, dto);
   }
