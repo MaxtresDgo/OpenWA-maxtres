@@ -5,6 +5,7 @@ import { Repository, DataSource, IsNull } from 'typeorm';
 import { Session, SessionStatus } from './entities/session.entity';
 import { EngineFactory } from '../../engine/engine.factory';
 import { EngineRegistry } from '../../engine/engine-registry.service';
+import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
 import { decideReconnect, clampNumber, STABLE_READY_MS, type ReconnectAttemptState } from './reconnect-policy';
 import { SessionLivenessWatchdog } from './session-liveness-watchdog.service';
 import { MessageProjector } from './message-projector.service';
@@ -349,7 +350,20 @@ export class SessionEngineLifecycle {
     // ownsSession() default below therefore has to be TRUE, not false.
     @Optional()
     private readonly ownership?: SessionOwnershipService,
+    // @Optional for the direct-construction specs; EngineModule is @Global, so a running gateway has it.
+    @Optional()
+    lidMappingStore?: LidMappingStoreService,
   ) {
+    // The lid table may not import the audit log, so its second-lid reports are written to it from here.
+    lidMappingStore?.onSecondLid(({ phone, previousLid, newLid, sessionId }) => {
+      void this.auditService?.logWarn(AuditAction.PHONE_SECOND_LID_REPORTED, {
+        sessionId: sessionId ?? undefined,
+        metadata: { phone, previousLid, newLid },
+        errorMessage:
+          `Phone ${phone} was reported under privacy id ${newLid} while ${previousLid} still maps to it. ` +
+          'Review the API keys whose allowed chats name either id or this number.',
+      });
+    });
     // The fence Maps are handed over BY REFERENCE: they stay lifecycle fields (specs poke them
     // through the lifecycle), while the fence logic operates on the same instances.
     this.fences = new SessionLifecycleFences({

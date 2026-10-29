@@ -860,6 +860,7 @@
     "chats": {
       "label": "Sohbet erişimi (isteğe bağlı)",
       "hint": "Her satıra bir sohbet: @g.us ile biten bir grup kimliği, @c.us veya @lid ile biten bir kişi kimliği ya da bir telefon numarası. Tüm sohbetler için boş bırakın. Sohbetle sınırlı bir anahtar yalnızca bu tür anahtarlara açık yolları kullanabilir; olay WebSocket'i ve MCP üzerinden erişimi de bu sohbetlerle sınırlı kalır.",
+      "lidHint": "Bir @lid girdisi, şu anda ona eşlenmiş telefon numarasına da izin verir. Bu numara başka birine geçerse bu anahtar o kişiye de ulaşabilir: bir kişi numarasını değiştirdiğinde anahtarı gözden geçirin.",
       "invalid": "Sohbet kimliği veya telefon numarası değil: {{value}}",
       "tooMany": "Çok fazla sohbet ({{count}}): bir anahtar en fazla {{max}} sohbet listeleyebilir."
     },

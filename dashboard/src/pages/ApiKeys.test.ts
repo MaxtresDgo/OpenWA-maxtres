@@ -221,6 +221,24 @@ test('a native digit entry that is no chat id is still refused and names the fol
   screen.getByText('Not a chat ID or phone number: 1234');
 });
 
+// An @lid entry also admits the number mapped to it, which WhatsApp may later give to someone else.
+test('the chat field says what an @lid entry admits, only while one is listed', async () => {
+  const { screen, fireEvent } = rtl;
+  const create = await openCreate();
+  const chats = screen.getByLabelText('Chat access (optional)');
+  const lidHint = /An @lid entry also admits the phone number currently mapped to it/;
+  fireEvent.change(chats, { target: { value: '6281234\n120363000@g.us' } });
+  assert.equal(screen.queryByText(lidHint) === null, true, 'no hint without an @lid entry');
+  assert.equal(chats.getAttribute('aria-describedby'), null);
+
+  fireEvent.change(chats, { target: { value: '6281234\n99887766554433@LID' } });
+  const hint = screen.getByText(lidHint);
+  assert.ok(hint.id);
+  assert.equal(chats.getAttribute('aria-describedby'), hint.id);
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'crm-bot' } });
+  assert.equal(create.disabled, false, 'the hint does not block the create');
+});
+
 test('an edit in native digits for the chat already stored sends nothing', async () => {
   const { screen, fireEvent, waitFor } = rtl;
   const save = await openEdit({ ...billingBot, allowedChats: ['6281234@c.us'] });

@@ -816,6 +816,7 @@
     "chats": {
       "label": "Acesso a chats (opcional)",
       "hint": "Um chat por linha: um ID de grupo terminado em @g.us, um ID de contato terminado em @c.us ou @lid, ou um número de telefone. Deixe em branco para todos os chats. Uma chave restrita a chats só pode usar as rotas abertas a esse tipo de chave; o acesso dela pelo WebSocket de eventos e pelo MCP fica limitado a esses chats.",
+      "lidHint": "Uma entrada @lid também admite o número de telefone associado a ela no momento. Se esse número passar para outra pessoa, esta chave pode alcançá-la: revise a chave quando um contato mudar de número.",
       "invalid": "Não é um ID de chat nem um número de telefone: {{value}}",
       "tooMany": "Chats demais ({{count}}): uma chave pode listar no máximo {{max}}."
     },

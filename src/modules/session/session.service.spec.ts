@@ -307,6 +307,7 @@ describe('SessionService', () => {
       lidsForPhone: jest.fn().mockReturnValue([]),
       findPhoneForLid: jest.fn().mockResolvedValue(null),
       findLidsForPhone: jest.fn().mockResolvedValue([]),
+      onSecondLid: jest.fn(),
     };
 
     statusStore = {

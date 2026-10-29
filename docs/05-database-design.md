@@ -656,7 +656,9 @@ lifecycle (`session_created`, `session_started`, `session_stopped`, `session_for
 `session_logged_out`, `session_deleted`, `session_qr_generated`, `session_connected`,
 `session_disconnected`, `session_config_updated`), WhatsApp-imposed account restrictions (`session_restricted`,
 `session_restriction_lifted`), a refused relink of a session to a different WhatsApp number
-(`session_rebind_rejected`, written as a WARN row), messages
+(`session_rebind_rejected`, written as a WARN row), a privacy id newly reported for a phone number the lid table
+already maps to another reported id (`phone_second_lid_reported`, a WARN row filed under the reporting session;
+pairs the table already held are not reported, unless an id has left the gateway's mapping cache), messages
 (`message_sent`, `message_failed`), send-pacing enforcement (`send_pacing_blocked`, sampled to at
 most one row per session per minute; `send_breaker_tripped`, never sampled), webhooks (`webhook_created`, `webhook_deleted`,
 `webhook_triggered`, `webhook_failed`), the delivery-failure redrive (`webhook_deliveries_redriven`, one row per

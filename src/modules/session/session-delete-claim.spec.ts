@@ -167,7 +167,7 @@ describe('A session deleted on one node while a peer shares the database', () =>
           provide: ConfigService,
           useValue: { get: jest.fn(<T>(key: string, def?: T): T => (key in values ? (values[key] as T) : (def as T))) },
         },
-        { provide: LidMappingStoreService, useValue: { remember: jest.fn() } },
+        { provide: LidMappingStoreService, useValue: { remember: jest.fn(), onSecondLid: jest.fn() } },
         { provide: StatusStoreService, useValue: { ingest: jest.fn(), captureWrites: jest.fn() } },
       ],
     }).compile();
