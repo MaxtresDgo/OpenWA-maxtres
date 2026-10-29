@@ -1076,7 +1076,8 @@ export class MessageSendService {
       assertBase64WithinMediaCap(base64, LINK_PREVIEW_THUMBNAIL_MAX_BYTES);
       return { ...metadata, thumbnailBase64: base64 };
     }
-    if (thumbnailUrl !== undefined) {
+    // A null passes the DTO's @IsOptional, so it means absent here too.
+    if (thumbnailUrl != null) {
       if (!isMediaUrl(thumbnailUrl)) {
         throw new BadRequestException(`customLinkPreview.thumbnailUrl: ${MEDIA_URL_MESSAGE}`);
       }

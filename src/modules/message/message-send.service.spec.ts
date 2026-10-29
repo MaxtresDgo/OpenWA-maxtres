@@ -24,6 +24,7 @@ import { SendIdempotencyKey } from './entities/send-idempotency-key.entity';
 import { SendIdempotencyService } from './idempotency/send-idempotency.service';
 import { SendIdempotencyInterceptor } from './idempotency/send-idempotency.interceptor';
 import * as sessionWriteScope from '../../common/utils/session-write-scope';
+import type { SendTextMessageDto } from './dto';
 
 // The real function, held before any test spies on the module export.
 const realCaptureSessionWrites = sessionWriteScope.captureSessionWrites;
@@ -313,6 +314,28 @@ describe('MessageSendService', () => {
         {
           customPreview: { url: 'https://example.com', title: 'Example', thumbnailBase64: 'AAAA' },
         },
+      );
+    });
+
+    // The DTO's @IsOptional lets an explicit null through, so the service reads it as absent too.
+    it('sends a preview whose image fields are null as one without an image', async () => {
+      const input = {
+        chatId: '628123456789@c.us',
+        text: 'see https://example.com',
+        customLinkPreview: { url: 'https://example.com', title: 'Example', thumbnailUrl: null, thumbnailBase64: null },
+      } as unknown as SendTextMessageDto;
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { sessionId: 'sess-1', input, type: 'text' },
+      });
+
+      await service.sendText('sess-1', input);
+
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith(
+        '628123456789@c.us',
+        'see https://example.com',
+        undefined,
+        { customPreview: { url: 'https://example.com', title: 'Example' } },
       );
     });
 
